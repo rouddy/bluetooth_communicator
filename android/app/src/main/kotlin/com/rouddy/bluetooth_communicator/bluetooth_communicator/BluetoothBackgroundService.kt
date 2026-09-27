@@ -44,7 +44,7 @@ class BluetoothBackgroundService : Service() {
         get() = adapter?.bluetoothLeScanner
 
     private val activeConnections = ConcurrentHashMap<String, BluetoothGatt>()
-    private val connectingAddresses = mutableSetOf<String>()
+    private val connectingAddresses = ConcurrentHashMap.newKeySet<String>()
     private val prefs by lazy { getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) }
 
     private var isAdvertising = false
@@ -145,7 +145,6 @@ class BluetoothBackgroundService : Service() {
             .addServiceUuid(ParcelUuid(SERVICE_UUID))
             .build()
         bleAdvertiser.startAdvertising(settings, data, advertiseCallback)
-        isAdvertising = true
     }
 
     @SuppressLint("MissingPermission")
@@ -211,11 +210,30 @@ class BluetoothBackgroundService : Service() {
     }
 
     private fun emitStatus() {
-        val status = buildString {
-            append(if (isAdvertising) "advertising " else "")
-            append(if (isScanning) "scanning " else "")
-            append(if (activeConnections.isNotEmpty()) "connected:${activeConnections.size}" else "idle")
-        }.trim()
+        val status = when {
+            activeConnections.isNotEmpty() -> {
+                buildString {
+                    if (isAdvertising) {
+                        append("advertising ")
+                    }
+                    if (isScanning) {
+                        append("scanning ")
+                    }
+                    append("connected:${activeConnections.size}")
+                }.trim()
+            }
+            isAdvertising || isScanning -> {
+                buildString {
+                    if (isAdvertising) {
+                        append("advertising ")
+                    }
+                    if (isScanning) {
+                        append("scanning ")
+                    }
+                }.trim()
+            }
+            else -> "idle"
+        }
         BleEventBus.emit(
             mapOf(
                 "type" to "status",
@@ -269,10 +287,12 @@ class BluetoothBackgroundService : Service() {
 
     private val advertiseCallback = object : AdvertiseCallback() {
         override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
+            isAdvertising = true
             emitStatus()
         }
 
         override fun onStartFailure(errorCode: Int) {
+            isAdvertising = false
             BleEventBus.emit(
                 mapOf(
                     "type" to "error",
