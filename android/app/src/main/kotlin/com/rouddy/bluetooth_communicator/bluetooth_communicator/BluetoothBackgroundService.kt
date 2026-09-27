@@ -103,6 +103,9 @@ class BluetoothBackgroundService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        isCentralEnabled = false
+        isAdvertising = false
+        isScanning = false
         stopAdvertising()
         stopScan()
         disconnectAll()
