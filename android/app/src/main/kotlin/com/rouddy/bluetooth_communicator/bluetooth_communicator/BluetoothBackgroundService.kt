@@ -11,6 +11,7 @@ import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCallback
 import android.bluetooth.BluetoothGattCharacteristic
+import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothManager
 import android.bluetooth.le.AdvertiseCallback
 import android.bluetooth.le.AdvertiseData
@@ -398,6 +399,19 @@ class BluetoothBackgroundService : Service() {
                 ?.getCharacteristic(MESSAGE_CHARACTERISTIC_UUID)
             if (characteristic != null) {
                 writableCharacteristics[address] = characteristic
+                gatt.setCharacteristicNotification(characteristic, true)
+                val cccd = characteristic.getDescriptor(CLIENT_CONFIG_DESCRIPTOR_UUID)
+                if (cccd != null) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        gatt.writeDescriptor(cccd, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        run {
+                            cccd.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                            gatt.writeDescriptor(cccd)
+                        }
+                    }
+                }
             }
         }
 
@@ -461,5 +475,7 @@ class BluetoothBackgroundService : Service() {
         private val SERVICE_UUID = UUID.fromString("1f9ed31d-b738-4d4c-a6d8-86dbf0f9c001")
         private val MESSAGE_CHARACTERISTIC_UUID =
             UUID.fromString("db912050-2e4e-4c4e-a543-e89121e57595")
+        private val CLIENT_CONFIG_DESCRIPTOR_UUID =
+            UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
     }
 }
