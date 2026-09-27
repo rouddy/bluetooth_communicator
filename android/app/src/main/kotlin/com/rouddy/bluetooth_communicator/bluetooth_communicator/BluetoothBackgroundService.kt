@@ -365,6 +365,7 @@ class BluetoothBackgroundService : Service() {
         override fun onScanResult(callbackType: Int, result: ScanResult?) {
             val device = result?.device ?: return
             val address = device.address ?: return
+            val knownDeviceIds = loadRegisteredDeviceIds()
             BleEventBus.emit(
                 mapOf(
                     "type" to "discovered",
@@ -372,7 +373,11 @@ class BluetoothBackgroundService : Service() {
                     "name" to (device.name ?: "")
                 )
             )
-            if (isCentralEnabled && device.bondState == BluetoothDevice.BOND_BONDED) {
+            if (
+                isCentralEnabled &&
+                device.bondState == BluetoothDevice.BOND_BONDED &&
+                knownDeviceIds.contains(address)
+            ) {
                 connectGattIfNeeded(device)
             }
         }
@@ -405,7 +410,7 @@ class BluetoothBackgroundService : Service() {
                             "deviceId" to address
                         )
                     )
-                    if (isCentralEnabled) {
+                    if (isCentralEnabled && loadRegisteredDeviceIds().contains(address)) {
                         connectGattIfNeeded(gatt.device)
                     }
                 }

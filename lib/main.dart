@@ -474,12 +474,14 @@ class BleAppController extends ChangeNotifier {
   }
 
   Future<void> sendMessage(String deviceId, String text) async {
-    _appendMessage(
-      deviceId,
-      BleMessage(text: text, timestamp: DateTime.now(), outgoing: true),
-    );
-    await _invoke('sendMessage', {'deviceId': deviceId, 'message': text});
-    notifyListeners();
+    final sent = await _invoke('sendMessage', {'deviceId': deviceId, 'message': text});
+    if (sent) {
+      _appendMessage(
+        deviceId,
+        BleMessage(text: text, timestamp: DateTime.now(), outgoing: true),
+      );
+      notifyListeners();
+    }
   }
 
   void clearUnreadForDevice(String deviceId) {
@@ -492,12 +494,14 @@ class BleAppController extends ChangeNotifier {
 
   int unreadCountFor(String deviceId) => unreadCountByDevice[deviceId] ?? 0;
 
-  Future<void> _invoke(String method, [Map<String, dynamic>? arguments]) async {
+  Future<bool> _invoke(String method, [Map<String, dynamic>? arguments]) async {
     try {
       await _methodChannel.invokeMethod<void>(method, arguments);
+      return true;
     } on PlatformException catch (error) {
       lastError = '${error.code}: ${error.message}';
       notifyListeners();
+      return false;
     }
   }
 

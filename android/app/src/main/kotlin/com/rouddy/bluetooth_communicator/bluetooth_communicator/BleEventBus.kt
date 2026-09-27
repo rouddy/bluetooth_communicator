@@ -18,7 +18,6 @@ object BleEventBus {
         sink = null
     }
 
-    @Synchronized
     fun emit(event: Map<String, Any?>) {
         mainHandler.post {
             synchronized(BleEventBus) {
