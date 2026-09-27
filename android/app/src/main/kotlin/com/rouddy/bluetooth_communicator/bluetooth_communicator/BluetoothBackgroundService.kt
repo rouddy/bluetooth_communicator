@@ -47,8 +47,13 @@ class BluetoothBackgroundService : Service() {
     private val connectingAddresses = ConcurrentHashMap.newKeySet<String>()
     private val prefs by lazy { getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) }
 
+    @Volatile
     private var isAdvertising = false
+
+    @Volatile
     private var isCentralEnabled = false
+
+    @Volatile
     private var isScanning = false
 
     override fun onCreate() {
@@ -350,7 +355,7 @@ class BluetoothBackgroundService : Service() {
                         )
                     )
                     if (isCentralEnabled) {
-                        reconnectBondedDevices()
+                        connectGattIfNeeded(gatt.device)
                     }
                 }
             }
