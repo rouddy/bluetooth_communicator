@@ -20,7 +20,10 @@ object BleEventBus {
 
     @Synchronized
     fun emit(event: Map<String, Any?>) {
-        val snapshot = sink
-        mainHandler.post { snapshot?.success(event) }
+        mainHandler.post {
+            synchronized(BleEventBus) {
+                sink?.success(event)
+            }
+        }
     }
 }

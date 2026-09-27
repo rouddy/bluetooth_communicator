@@ -74,6 +74,7 @@ import UIKit
 
 final class IOSBleBackgroundManager: NSObject, FlutterStreamHandler {
   private let serviceUUID = CBUUID(string: "1F9ED31D-B738-4D4C-A6D8-86DBF0F9C001")
+  private let messageCharacteristicUUID = CBUUID(string: "DB912050-2E4E-4C4E-A543-E89121E57595")
   private let prefs = UserDefaults.standard
 
   private lazy var centralManager: CBCentralManager = {
@@ -93,6 +94,7 @@ final class IOSBleBackgroundManager: NSObject, FlutterStreamHandler {
 
   private var eventSink: FlutterEventSink?
   private var peripherals: [UUID: CBPeripheral] = [:]
+  private var writableCharacteristics: [UUID: CBCharacteristic] = [:]
   private var advertisingEnabled = false
   private var centralEnabled = false
 
@@ -155,8 +157,24 @@ final class IOSBleBackgroundManager: NSObject, FlutterStreamHandler {
   }
 
   func sendMessage(deviceId: String?, message: String?) {
-    guard let deviceId, let message else { return }
-    emit(type: "message", payload: ["deviceId": deviceId, "message": "echo:\(message)"])
+    guard
+      let deviceId,
+      let message,
+      let uuid = UUID(uuidString: deviceId),
+      let peripheral = peripherals[uuid],
+      let characteristic = writableCharacteristics[uuid]
+    else {
+      emit(type: "error", payload: ["message": "No writable BLE connection"])
+      return
+    }
+    let data = Data(message.utf8)
+    if characteristic.properties.contains(.write) {
+      peripheral.writeValue(data, for: characteristic, type: .withResponse)
+    } else if characteristic.properties.contains(.writeWithoutResponse) {
+      peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
+    } else {
+      emit(type: "error", payload: ["message": "Characteristic not writable"])
+    }
   }
 
   private func startAdvertisingIfPossible() {
@@ -218,6 +236,8 @@ extension IOSBleBackgroundManager: CBCentralManagerDelegate {
   }
 
   func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+    peripheral.delegate = self
+    peripheral.discoverServices([serviceUUID])
     emit(type: "connected", payload: ["deviceId": peripheral.identifier.uuidString])
   }
 
@@ -226,6 +246,7 @@ extension IOSBleBackgroundManager: CBCentralManagerDelegate {
     didDisconnectPeripheral peripheral: CBPeripheral,
     error: Error?
   ) {
+    writableCharacteristics.removeValue(forKey: peripheral.identifier)
     emit(type: "disconnected", payload: ["deviceId": peripheral.identifier.uuidString])
     if centralEnabled {
       central.connect(peripheral, options: nil)
@@ -249,5 +270,46 @@ extension IOSBleBackgroundManager: CBPeripheralManagerDelegate {
 
   func peripheralManager(_ peripheral: CBPeripheralManager, willRestoreState dict: [String: Any]) {
     emit(type: "status", payload: ["status": "peripheral-restored"])
+  }
+}
+
+extension IOSBleBackgroundManager: CBPeripheralDelegate {
+  func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
+    guard error == nil else { return }
+    peripheral.services?.forEach { service in
+      if service.uuid == serviceUUID {
+        peripheral.discoverCharacteristics([messageCharacteristicUUID], for: service)
+      }
+    }
+  }
+
+  func peripheral(
+    _ peripheral: CBPeripheral,
+    didDiscoverCharacteristicsFor service: CBService,
+    error: Error?
+  ) {
+    guard error == nil else { return }
+    let characteristic = service.characteristics?.first { $0.uuid == messageCharacteristicUUID }
+    if let characteristic {
+      writableCharacteristics[peripheral.identifier] = characteristic
+      peripheral.setNotifyValue(true, for: characteristic)
+    }
+  }
+
+  func peripheral(
+    _ peripheral: CBPeripheral,
+    didUpdateValueFor characteristic: CBCharacteristic,
+    error: Error?
+  ) {
+    guard
+      error == nil,
+      characteristic.uuid == messageCharacteristicUUID,
+      let value = characteristic.value,
+      let message = String(data: value, encoding: .utf8)
+    else { return }
+    emit(type: "message", payload: [
+      "deviceId": peripheral.identifier.uuidString,
+      "message": message
+    ])
   }
 }

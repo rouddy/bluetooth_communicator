@@ -10,6 +10,7 @@ import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCallback
+import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothManager
 import android.bluetooth.le.AdvertiseCallback
 import android.bluetooth.le.AdvertiseData
@@ -44,6 +45,7 @@ class BluetoothBackgroundService : Service() {
         get() = adapter?.bluetoothLeScanner
 
     private val activeConnections = ConcurrentHashMap<String, BluetoothGatt>()
+    private val writableCharacteristics = ConcurrentHashMap<String, BluetoothGattCharacteristic>()
     private val connectingAddresses = ConcurrentHashMap.newKeySet<String>()
     private val prefs by lazy { getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) }
 
@@ -91,13 +93,7 @@ class BluetoothBackgroundService : Service() {
                 val deviceId = intent.getStringExtra(EXTRA_DEVICE_ID)
                 val message = intent.getStringExtra(EXTRA_MESSAGE)
                 if (!deviceId.isNullOrBlank() && !message.isNullOrBlank()) {
-                    BleEventBus.emit(
-                        mapOf(
-                            "type" to "message",
-                            "deviceId" to deviceId,
-                            "message" to "echo:$message"
-                        )
-                    )
+                    sendMessage(deviceId, message)
                 }
             }
         }
@@ -208,6 +204,7 @@ class BluetoothBackgroundService : Service() {
     private fun disconnectAll() {
         val entries = activeConnections.values.toList()
         activeConnections.clear()
+        writableCharacteristics.clear()
         connectingAddresses.clear()
         entries.forEach {
             runCatching {
@@ -223,6 +220,33 @@ class BluetoothBackgroundService : Service() {
                 buildString {
                     if (isAdvertising) {
                         append("advertising ")
+                    }
+
+                    @SuppressLint("MissingPermission")
+                    private fun sendMessage(deviceId: String, message: String) {
+                        val gatt = activeConnections[deviceId]
+                        val characteristic = writableCharacteristics[deviceId]
+                        if (gatt == null || characteristic == null) {
+                            BleEventBus.emit(
+                                mapOf(
+                                    "type" to "error",
+                                    "message" to "No writable BLE connection for $deviceId"
+                                )
+                            )
+                            return
+                        }
+                        val payload = message.toByteArray(Charsets.UTF_8)
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                            gatt.writeCharacteristic(
+                                characteristic,
+                                payload,
+                                BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                            )
+                        } else {
+                            characteristic.value = payload
+                            characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                            gatt.writeCharacteristic(characteristic)
+                        }
                     }
                     if (isScanning) {
                         append("scanning ")
@@ -337,6 +361,7 @@ class BluetoothBackgroundService : Service() {
                 android.bluetooth.BluetoothProfile.STATE_CONNECTED -> {
                     connectingAddresses.remove(address)
                     activeConnections[address] = gatt
+                    gatt.discoverServices()
                     BleEventBus.emit(
                         mapOf(
                             "type" to "connected",
@@ -347,6 +372,7 @@ class BluetoothBackgroundService : Service() {
                 android.bluetooth.BluetoothProfile.STATE_DISCONNECTED -> {
                     connectingAddresses.remove(address)
                     activeConnections.remove(address)
+                    writableCharacteristics.remove(address)
                     runCatching { gatt.close() }
                     BleEventBus.emit(
                         mapOf(
@@ -360,6 +386,57 @@ class BluetoothBackgroundService : Service() {
                 }
             }
             emitStatus()
+        }
+
+        @SuppressLint("MissingPermission")
+        override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                return
+            }
+            val address = gatt.device.address ?: return
+            val characteristic = gatt.getService(SERVICE_UUID)
+                ?.getCharacteristic(MESSAGE_CHARACTERISTIC_UUID)
+            if (characteristic != null) {
+                writableCharacteristics[address] = characteristic
+            }
+        }
+
+        override fun onCharacteristicChanged(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic
+        ) {
+            if (characteristic.uuid != MESSAGE_CHARACTERISTIC_UUID) {
+                return
+            }
+            val address = gatt.device.address ?: return
+            val message = characteristic.value?.toString(Charsets.UTF_8) ?: return
+            BleEventBus.emit(
+                mapOf(
+                    "type" to "message",
+                    "deviceId" to address,
+                    "message" to message
+                )
+            )
+        }
+
+        @Suppress("DEPRECATION")
+        override fun onCharacteristicChanged(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            value: ByteArray
+        ) {
+            if (characteristic.uuid != MESSAGE_CHARACTERISTIC_UUID) {
+                return
+            }
+            val address = gatt.device.address ?: return
+            val message = value.toString(Charsets.UTF_8)
+            BleEventBus.emit(
+                mapOf(
+                    "type" to "message",
+                    "deviceId" to address,
+                    "message" to message
+                )
+            )
         }
     }
 
@@ -382,5 +459,7 @@ class BluetoothBackgroundService : Service() {
         private const val NOTIFICATION_CHANNEL_ID = "ble_background"
         private const val NOTIFICATION_ID = 2001
         private val SERVICE_UUID = UUID.fromString("1f9ed31d-b738-4d4c-a6d8-86dbf0f9c001")
+        private val MESSAGE_CHARACTERISTIC_UUID =
+            UUID.fromString("db912050-2e4e-4c4e-a543-e89121e57595")
     }
 }
