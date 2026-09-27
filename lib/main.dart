@@ -272,10 +272,12 @@ class _DeviceControlPageState extends State<DeviceControlPage> {
             title: Text(isConnected ? '연결됨' : '연결 안 됨'),
             subtitle: Text(widget.device.identifier),
             trailing: FilledButton.tonal(
-              onPressed: () {
-                widget.controller.connectDevice(widget.device.identifier);
-              },
-              child: const Text('연결'),
+              onPressed: isConnected
+                  ? null
+                  : () {
+                      widget.controller.connectDevice(widget.device.identifier);
+                    },
+              child: Text(isConnected ? '연결됨' : '연결'),
             ),
           ),
           const Divider(height: 1),
@@ -380,7 +382,6 @@ class BleAppController extends ChangeNotifier {
 
   List<BleDevice> get devicesWithUnreadMessages {
     return allKnownDevices
-        .where((device) => unreadCountByDevice[device.identifier] != null)
         .where((device) => (unreadCountByDevice[device.identifier] ?? 0) > 0)
         .toList();
   }

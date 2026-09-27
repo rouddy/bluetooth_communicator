@@ -401,6 +401,7 @@ class BluetoothBackgroundService : Service() {
             }
         }
 
+        @Suppress("DEPRECATION")
         override fun onCharacteristicChanged(
             gatt: BluetoothGatt,
             characteristic: BluetoothGattCharacteristic
@@ -419,7 +420,6 @@ class BluetoothBackgroundService : Service() {
             )
         }
 
-        @Suppress("DEPRECATION")
         override fun onCharacteristicChanged(
             gatt: BluetoothGatt,
             characteristic: BluetoothGattCharacteristic,
