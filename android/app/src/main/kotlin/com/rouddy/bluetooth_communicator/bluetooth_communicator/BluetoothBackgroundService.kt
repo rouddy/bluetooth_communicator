@@ -214,39 +214,39 @@ class BluetoothBackgroundService : Service() {
         }
     }
 
+    @SuppressLint("MissingPermission")
+    private fun sendMessage(deviceId: String, message: String) {
+        val gatt = activeConnections[deviceId]
+        val characteristic = writableCharacteristics[deviceId]
+        if (gatt == null || characteristic == null) {
+            BleEventBus.emit(
+                mapOf(
+                    "type" to "error",
+                    "message" to "No writable BLE connection for $deviceId"
+                )
+            )
+            return
+        }
+        val payload = message.toByteArray(Charsets.UTF_8)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            gatt.writeCharacteristic(
+                characteristic,
+                payload,
+                BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+            )
+        } else {
+            characteristic.value = payload
+            characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+            gatt.writeCharacteristic(characteristic)
+        }
+    }
+
     private fun emitStatus() {
         val status = when {
             activeConnections.isNotEmpty() -> {
                 buildString {
                     if (isAdvertising) {
                         append("advertising ")
-                    }
-
-                    @SuppressLint("MissingPermission")
-                    private fun sendMessage(deviceId: String, message: String) {
-                        val gatt = activeConnections[deviceId]
-                        val characteristic = writableCharacteristics[deviceId]
-                        if (gatt == null || characteristic == null) {
-                            BleEventBus.emit(
-                                mapOf(
-                                    "type" to "error",
-                                    "message" to "No writable BLE connection for $deviceId"
-                                )
-                            )
-                            return
-                        }
-                        val payload = message.toByteArray(Charsets.UTF_8)
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                            gatt.writeCharacteristic(
-                                characteristic,
-                                payload,
-                                BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-                            )
-                        } else {
-                            characteristic.value = payload
-                            characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-                            gatt.writeCharacteristic(characteristic)
-                        }
                     }
                     if (isScanning) {
                         append("scanning ")

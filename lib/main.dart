@@ -191,7 +191,7 @@ class NotificationPage extends StatelessWidget {
           Text('읽지 않은 기기', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 8),
           if (unreadDevices.isEmpty)
-            const Text('읽지 않은 메세지가 없습니다.')
+            const Text('읽지 않은 메시지가 없습니다.')
           else
             ...unreadDevices.map(
               (device) => Card(
@@ -210,7 +210,7 @@ class NotificationPage extends StatelessWidget {
           Text('Message history', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 8),
           if (history.isEmpty)
-            const Text('메세지 기록이 없습니다.')
+            const Text('메시지 기록이 없습니다.')
           else
             ...history.map(
               (entry) => ListTile(
@@ -305,7 +305,7 @@ class _DeviceControlPageState extends State<DeviceControlPage> {
                       controller: _textController,
                       decoration: const InputDecoration(
                         border: OutlineInputBorder(),
-                        hintText: '메세지 입력',
+                        hintText: '메시지 입력',
                       ),
                     ),
                   ),
