@@ -246,7 +246,21 @@ class _DeviceControlPageState extends State<DeviceControlPage> {
   final TextEditingController _textController = TextEditingController();
 
   @override
+  void initState() {
+    super.initState();
+    widget.controller.addListener(_onControllerUpdate);
+  }
+
+  void _onControllerUpdate() {
+    if (!mounted) {
+      return;
+    }
+    setState(() {});
+  }
+
+  @override
   void dispose() {
+    widget.controller.removeListener(_onControllerUpdate);
     _textController.dispose();
     super.dispose();
   }

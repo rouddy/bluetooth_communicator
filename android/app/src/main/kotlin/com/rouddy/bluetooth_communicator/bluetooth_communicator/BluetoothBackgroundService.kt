@@ -30,6 +30,7 @@ import android.os.IBinder
 import android.os.ParcelUuid
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
+import org.json.JSONArray
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
@@ -128,10 +129,33 @@ class BluetoothBackgroundService : Service() {
 
     @SuppressLint("MissingPermission")
     private fun reconnectBondedDevices() {
+        val knownDeviceIds = loadRegisteredDeviceIds()
+        if (knownDeviceIds.isEmpty()) {
+            return
+        }
         val bondState = BluetoothDevice.BOND_BONDED
         adapter?.bondedDevices
-            ?.filter { device -> device.bondState == bondState }
+            ?.filter { device ->
+                device.bondState == bondState && knownDeviceIds.contains(device.address)
+            }
             ?.forEach { connectGattIfNeeded(it) }
+    }
+
+    private fun loadRegisteredDeviceIds(): Set<String> {
+        val flutterPrefs = getSharedPreferences(FLUTTER_PREFS_NAME, Context.MODE_PRIVATE)
+        val raw = flutterPrefs.getString(FLUTTER_REGISTERED_DEVICES_KEY, null) ?: return emptySet()
+        return runCatching {
+            val array = JSONArray(raw)
+            buildSet {
+                for (index in 0 until array.length()) {
+                    val item = array.optJSONObject(index) ?: continue
+                    val identifier = item.optString("identifier")
+                    if (identifier.isNotBlank()) {
+                        add(identifier)
+                    }
+                }
+            }
+        }.getOrElse { emptySet() }
     }
 
     @SuppressLint("MissingPermission")
@@ -470,6 +494,9 @@ class BluetoothBackgroundService : Service() {
         private const val PREFS_NAME = "ble_service_prefs"
         private const val PREF_ADVERTISING = "pref_advertising"
         private const val PREF_CENTRAL = "pref_central"
+        private const val FLUTTER_PREFS_NAME = "FlutterSharedPreferences"
+        private const val FLUTTER_REGISTERED_DEVICES_KEY =
+            "flutter.prefs_registered_devices"
         private const val NOTIFICATION_CHANNEL_ID = "ble_background"
         private const val NOTIFICATION_ID = 2001
         private val SERVICE_UUID = UUID.fromString("1f9ed31d-b738-4d4c-a6d8-86dbf0f9c001")
