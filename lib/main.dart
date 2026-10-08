@@ -158,6 +158,17 @@ class SettingsPage extends StatelessWidget {
             onTap: controller.scanNow,
           ),
           ListTile(
+            leading: const Icon(Icons.security),
+            title: const Text('권한 요청'),
+            subtitle: const Text('Bluetooth 및 알림 권한 허용'),
+            onTap: () async {
+              final granted = await controller.requestPermissions();
+              if (granted) {
+                await controller.initialize();
+              }
+            },
+          ),
+          ListTile(
             leading: const Icon(Icons.info_outline),
             title: const Text('Background 상태'),
             subtitle: Text(controller.backgroundStatus),
@@ -418,6 +429,26 @@ class BleAppController extends ChangeNotifier {
     return history;
   }
 
+  Future<bool> checkPermissions() async {
+    try {
+      final bool? granted = await _methodChannel.invokeMethod<bool>('checkPermissions');
+      return granted ?? false;
+    } on PlatformException catch (_) {
+      return false;
+    }
+  }
+
+  Future<bool> requestPermissions() async {
+    try {
+      final bool? granted = await _methodChannel.invokeMethod<bool>('requestPermissions');
+      return granted ?? false;
+    } on PlatformException catch (error) {
+      lastError = '${error.code}: ${error.message}';
+      notifyListeners();
+      return false;
+    }
+  }
+
   Future<void> initialize() async {
     _prefs = await SharedPreferences.getInstance();
     _loadFromPrefs();
@@ -428,7 +459,12 @@ class BleAppController extends ChangeNotifier {
         notifyListeners();
       },
     );
-    await _invoke('initialize');
+    final hasPermission = await checkPermissions();
+    if (!hasPermission) {
+      await requestPermissions();
+    } else {
+      await _invoke('initialize');
+    }
     if (advertisingEnabled) {
       await _invoke('setAdvertisingEnabled', {'enabled': true});
     }

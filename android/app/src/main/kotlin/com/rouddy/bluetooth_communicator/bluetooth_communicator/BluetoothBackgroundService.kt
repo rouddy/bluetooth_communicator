@@ -25,6 +25,7 @@ import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.os.ParcelUuid
@@ -63,7 +64,30 @@ class BluetoothBackgroundService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
-        startForeground(NOTIFICATION_ID, buildNotification("Running"))
+        startForegroundSafely()
+    }
+
+    private fun startForegroundSafely() {
+        try {
+            val notification = buildNotification("Running")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(
+                    NOTIFICATION_ID,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+                )
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+            BleEventBus.emit(
+                mapOf(
+                    "type" to "error",
+                    "message" to "Failed to start foreground service: ${e.message}"
+                )
+            )
+        }
     }
 
     @SuppressLint("MissingPermission")
@@ -328,17 +352,24 @@ class BluetoothBackgroundService : Service() {
     }
 
     private fun hasBlePermissions(): Boolean {
-        val required = mutableListOf(
-            Manifest.permission.BLUETOOTH,
-            Manifest.permission.BLUETOOTH_ADMIN
-        )
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            required += Manifest.permission.BLUETOOTH_SCAN
-            required += Manifest.permission.BLUETOOTH_ADVERTISE
-            required += Manifest.permission.BLUETOOTH_CONNECT
-        }
-        return required.all { permission ->
-            ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
+            val permissions = listOf(
+                Manifest.permission.BLUETOOTH_SCAN,
+                Manifest.permission.BLUETOOTH_CONNECT,
+                Manifest.permission.BLUETOOTH_ADVERTISE
+            )
+            return permissions.all { permission ->
+                ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
+            }
+        } else {
+            val permissions = listOf(
+                Manifest.permission.BLUETOOTH,
+                Manifest.permission.BLUETOOTH_ADMIN,
+                Manifest.permission.ACCESS_FINE_LOCATION
+            )
+            return permissions.all { permission ->
+                ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
+            }
         }
     }
 
