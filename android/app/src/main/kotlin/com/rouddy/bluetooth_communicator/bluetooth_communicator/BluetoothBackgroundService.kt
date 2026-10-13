@@ -110,7 +110,10 @@ class BluetoothBackgroundService : Service() {
     @SuppressLint("MissingPermission")
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_RESTORE -> restoreStateFromPrefs()
+            ACTION_RESTORE -> {
+                restoreStateFromPrefs()
+                emitCurrentConnections()
+            }
             ACTION_START_ADVERTISING -> {
                 prefs.edit().putBoolean(PREF_ADVERTISING, true).apply()
                 startAdvertising()
@@ -165,6 +168,19 @@ class BluetoothBackgroundService : Service() {
         if (isCentralEnabled) {
             startScan()
             reconnectBondedDevices()
+        }
+    }
+
+    // The service outlives the Flutter activity, so a newly attached Dart side has to be
+    // told about links that were established before it started listening.
+    private fun emitCurrentConnections() {
+        (activeConnections.keys + subscribedCentrals.keys).forEach { address ->
+            BleEventBus.emit(
+                mapOf(
+                    "type" to "connected",
+                    "deviceId" to address
+                )
+            )
         }
     }
 
@@ -344,6 +360,13 @@ class BluetoothBackgroundService : Service() {
                 it.disconnect()
                 it.close()
             }
+            // close() unregisters the callback, so onConnectionStateChange won't report this.
+            BleEventBus.emit(
+                mapOf(
+                    "type" to "disconnected",
+                    "deviceId" to it.device.address
+                )
+            )
         }
     }
 
