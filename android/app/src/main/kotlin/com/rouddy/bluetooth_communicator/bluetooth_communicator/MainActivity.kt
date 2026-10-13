@@ -111,14 +111,11 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun getRequiredPermissions(): List<String> {
-        val list = mutableListOf<String>()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            list.add(Manifest.permission.BLUETOOTH_SCAN)
-            list.add(Manifest.permission.BLUETOOTH_CONNECT)
-            list.add(Manifest.permission.BLUETOOTH_ADVERTISE)
-        } else {
-            list.add(Manifest.permission.ACCESS_FINE_LOCATION)
-        }
+        val list = mutableListOf(
+            Manifest.permission.BLUETOOTH_SCAN,
+            Manifest.permission.BLUETOOTH_CONNECT,
+            Manifest.permission.BLUETOOTH_ADVERTISE
+        )
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             list.add(Manifest.permission.POST_NOTIFICATIONS)
         }
@@ -189,11 +186,7 @@ class MainActivity : FlutterActivity() {
             }
         }
         try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                startForegroundService(intent)
-            } else {
-                startService(intent)
-            }
+            startForegroundService(intent)
         } catch (e: Exception) {
             e.printStackTrace()
             BleEventBus.emit(

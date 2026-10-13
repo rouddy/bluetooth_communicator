@@ -38,6 +38,7 @@ When you add a method or event, update `lib/main.dart` (`BleAppController._invok
 
 ### Android (`android/app/src/main/kotlin/.../bluetooth_communicator/`)
 
+- `minSdk` is 31 (Android 12), so the app only uses the `BLUETOOTH_SCAN`/`CONNECT`/`ADVERTISE` runtime permissions and has no location-permission or pre-Oreo code paths. The remaining `SDK_INT` checks are for API 33 (`TIRAMISU`) GATT/parcel APIs.
 - `MainActivity` doesn't touch BLE. It turns each method call into an `Intent` action (`ble.action.*`) and sends it to `BluetoothBackgroundService` with `startForegroundService`.
 - `BluetoothBackgroundService` is a `START_STICKY` foreground service (`connectedDevice` type). It owns advertising (plus the GATT server, opened and closed with it), scanning, and GATT client connections. Connections go through bonding: an unbonded device is bonded first (`bondStateReceiver` waits for `BOND_BONDED`) and then connected with `connectGatt(autoConnect=true)`. It reconnects bonded registered devices when they disconnect while central mode is on. It saves its own toggle state in `ble_service_prefs`, separately from Dart's prefs, so it can restore that state without Flutter running.
 - Bonding is what keeps `deviceId` stable. Unbonded phones advertise with rotating random addresses. Once bonded, the stack resolves every later advertisement and incoming connection from that phone to the address it had at bonding time. So scan results, client links, and GATT server peers all report the same ID.
