@@ -61,6 +61,9 @@ class BluetoothBackgroundService : Service() {
     @Volatile
     private var isScanning = false
 
+    @Volatile
+    private var advertiseDeviceName = true
+
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
@@ -193,11 +196,16 @@ class BluetoothBackgroundService : Service() {
             .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_MEDIUM)
             .setConnectable(true)
             .build()
+        // A 128-bit UUID plus a long (e.g. Korean UTF-8) device name exceeds the
+        // 31-byte legacy payload, so the name goes into the scan response instead.
         val data = AdvertiseData.Builder()
-            .setIncludeDeviceName(true)
-            .addServiceUuid(ParcelUuid(SERVICE_UUID))
+            .setIncludeDeviceName(false)
+            .addServiceUuid(SERVICE_PARCEL_UUID)
             .build()
-        bleAdvertiser.startAdvertising(settings, data, advertiseCallback)
+        val scanResponse = AdvertiseData.Builder()
+            .setIncludeDeviceName(advertiseDeviceName)
+            .build()
+        bleAdvertiser.startAdvertising(settings, data, scanResponse, advertiseCallback)
     }
 
     @SuppressLint("MissingPermission")
@@ -214,7 +222,7 @@ class BluetoothBackgroundService : Service() {
         val bleScanner = scanner ?: return
         val filters = listOf(
             ScanFilter.Builder()
-                .setServiceUuid(ParcelUuid(SERVICE_UUID))
+                .setServiceUuid(SERVICE_PARCEL_UUID)
                 .build()
         )
         val settings = ScanSettings.Builder()
@@ -380,6 +388,12 @@ class BluetoothBackgroundService : Service() {
         }
 
         override fun onStartFailure(errorCode: Int) {
+            if (errorCode == AdvertiseCallback.ADVERTISE_FAILED_DATA_TOO_LARGE && advertiseDeviceName) {
+                // The device name doesn't fit even in the scan response; retry without it.
+                advertiseDeviceName = false
+                startAdvertising()
+                return
+            }
             isAdvertising = false
             BleEventBus.emit(
                 mapOf(
@@ -401,7 +415,7 @@ class BluetoothBackgroundService : Service() {
                 mapOf(
                     "type" to "discovered",
                     "deviceId" to address,
-                    "name" to (device.name ?: "")
+                    "name" to (result.scanRecord?.deviceName ?: device.name ?: "")
                 )
             )
             if (
@@ -536,6 +550,7 @@ class BluetoothBackgroundService : Service() {
         private const val NOTIFICATION_CHANNEL_ID = "ble_background"
         private const val NOTIFICATION_ID = 2001
         private val SERVICE_UUID = UUID.fromString("1f9ed31d-b738-4d4c-a6d8-86dbf0f9c001")
+        private val SERVICE_PARCEL_UUID = ParcelUuid(SERVICE_UUID)
         private val MESSAGE_CHARACTERISTIC_UUID =
             UUID.fromString("db912050-2e4e-4c4e-a543-e89121e57595")
         private val CLIENT_CONFIG_DESCRIPTOR_UUID =
