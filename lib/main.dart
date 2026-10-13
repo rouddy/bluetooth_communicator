@@ -88,43 +88,77 @@ class DeviceListPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final devices = controller.allKnownDevices;
-    if (devices.isEmpty) {
+    final knownIds = devices.map((d) => d.identifier).toSet();
+    final nearbyDevices = controller.discoveredDevices
+        .where((d) => !knownIds.contains(d.identifier))
+        .toList();
+    if (devices.isEmpty && nearbyDevices.isEmpty) {
       return const Center(child: Text('연결 기록이 있는 기기가 없습니다.'));
     }
 
-    return ListView.separated(
+    return ListView(
       padding: const EdgeInsets.symmetric(vertical: 8),
-      itemCount: devices.length,
-      separatorBuilder: (_, _) => const Divider(height: 1),
-      itemBuilder: (context, index) {
-        final device = devices[index];
-        final isConnected = controller.connectedDeviceIds.contains(device.identifier);
-        final unreadCount = controller.unreadCountFor(device.identifier);
-        return ListTile(
-          leading: Icon(
-            isConnected ? Icons.bluetooth_connected : Icons.bluetooth_disabled,
-          ),
-          title: Text(device.name.isEmpty ? '(Unknown)' : device.name),
-          subtitle: Text(
-            '${isConnected ? "연결됨" : "연결 안 됨"} · ${device.identifier}',
-          ),
-          trailing: unreadCount > 0
-              ? Badge(
-                  label: Text(unreadCount.toString()),
-                  child: const Icon(Icons.mark_chat_unread_outlined),
-                )
-              : null,
-          onTap: () {
-            controller.clearUnreadForDevice(device.identifier);
-            Navigator.of(context).push(
-              MaterialPageRoute<void>(
-                builder: (_) =>
-                    DeviceControlPage(controller: controller, device: device),
-              ),
-            );
-          },
-        );
+      children: [
+        if (devices.isNotEmpty) const _SectionHeader('연결 기록'),
+        ...devices.map((device) => _buildKnownTile(context, device)),
+        if (nearbyDevices.isNotEmpty) const _SectionHeader('주변 기기'),
+        ...nearbyDevices.map((device) => _buildNearbyTile(context, device)),
+      ],
+    );
+  }
+
+  Widget _buildKnownTile(BuildContext context, BleDevice device) {
+    final isConnected = controller.connectedDeviceIds.contains(device.identifier);
+    final unreadCount = controller.unreadCountFor(device.identifier);
+    return ListTile(
+      leading: Icon(
+        isConnected ? Icons.bluetooth_connected : Icons.bluetooth_disabled,
+      ),
+      title: Text(device.name.isEmpty ? '(Unknown)' : device.name),
+      subtitle: Text(
+        '${isConnected ? "연결됨" : "연결 안 됨"} · ${device.identifier}',
+      ),
+      trailing: unreadCount > 0
+          ? Badge(
+              label: Text(unreadCount.toString()),
+              child: const Icon(Icons.mark_chat_unread_outlined),
+            )
+          : null,
+      onTap: () {
+        controller.clearUnreadForDevice(device.identifier);
+        _openDevice(context, device);
       },
+    );
+  }
+
+  Widget _buildNearbyTile(BuildContext context, BleDevice device) {
+    return ListTile(
+      leading: const Icon(Icons.bluetooth_searching),
+      title: Text(device.name.isEmpty ? '(Unknown)' : device.name),
+      subtitle: Text(device.identifier),
+      onTap: () => _openDevice(context, device),
+    );
+  }
+
+  void _openDevice(BuildContext context, BleDevice device) {
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => DeviceControlPage(controller: controller, device: device),
+      ),
+    );
+  }
+}
+
+class _SectionHeader extends StatelessWidget {
+  const _SectionHeader(this.title);
+
+  final String title;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
+      child: Text(title, style: Theme.of(context).textTheme.titleSmall),
     );
   }
 }
