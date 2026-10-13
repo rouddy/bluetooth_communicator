@@ -22,9 +22,10 @@ This is a Flutter app for exchanging text messages between phones over BLE. Ever
 
 ### Platform channel contract (keep all three sides in sync)
 
-- **MethodChannel** `com.rouddy.bluetooth_communicator/bluetooth_control`. Methods: `initialize`, `setAdvertisingEnabled{enabled}`, `setCentralEnabled{enabled}`, `scanNow`, `connectDevice{deviceId}`, `sendMessage{deviceId, message}`.
+- **MethodChannel** `com.rouddy.bluetooth_communicator/bluetooth_control`. Methods: `initialize`, `setAdvertisingEnabled{enabled}`, `setCentralEnabled{enabled}`, `scanNow`, `connectDevice{deviceId, pair}`, `sendMessage{deviceId, message}`.
 - **EventChannel** `com.rouddy.bluetooth_communicator/bluetooth_events`. Each event is a flat map with a `type` key: `status{status}`, `discovered{deviceId, name}`, `connected{deviceId}`, `disconnected{deviceId}`, `message{deviceId, message}`, `error{message}`.
 - Shared GATT UUIDs are hard-coded on both native sides. Service `1F9ED31D-B738-4D4C-A6D8-86DBF0F9C001`, message characteristic `DB912050-2E4E-4C4E-A543-E89121E57595`. Messages are sent as raw UTF-8 bytes.
+- `pair` is true only for user-initiated connects (the 연결 button). Android then bonds unbonded devices first via `createBond()`, which shows the system pairing dialog. Without it, Android connects only to already-bonded devices, so replaying saved devices on launch never prompts. iOS ignores it.
 - `deviceId` is the MAC address on Android and the `CBPeripheral.identifier` UUID string on iOS. These IDs are not portable between platforms.
 
 When you add a method or event, update `lib/main.dart` (`BleAppController._invoke` / `_handleEvent`), `MainActivity.kt` + `BluetoothBackgroundService.kt`, and `AppDelegate.swift`.
@@ -38,7 +39,9 @@ When you add a method or event, update `lib/main.dart` (`BleAppController._invok
 ### Android (`android/app/src/main/kotlin/.../bluetooth_communicator/`)
 
 - `MainActivity` doesn't touch BLE. It turns each method call into an `Intent` action (`ble.action.*`) and sends it to `BluetoothBackgroundService` with `startForegroundService`.
-- `BluetoothBackgroundService` is a `START_STICKY` foreground service (`connectedDevice` type). It owns advertising (plus the GATT server, opened and closed with it), scanning, and GATT client connections. Bonded devices use `connectGatt(autoConnect=true)`, and unbonded ones connect directly, because background connect rejects random addresses. It reconnects bonded registered devices when they disconnect while central mode is on. It saves its own toggle state in `ble_service_prefs`, separately from Dart's prefs, so it can restore that state without Flutter running.
+- `BluetoothBackgroundService` is a `START_STICKY` foreground service (`connectedDevice` type). It owns advertising (plus the GATT server, opened and closed with it), scanning, and GATT client connections. Connections go through bonding: an unbonded device is bonded first (`bondStateReceiver` waits for `BOND_BONDED`) and then connected with `connectGatt(autoConnect=true)`. It reconnects bonded registered devices when they disconnect while central mode is on. It saves its own toggle state in `ble_service_prefs`, separately from Dart's prefs, so it can restore that state without Flutter running.
+- Bonding is what keeps `deviceId` stable. Unbonded phones advertise with rotating random addresses. Once bonded, the stack resolves every later advertisement and incoming connection from that phone to the address it had at bonding time. So scan results, client links, and GATT server peers all report the same ID.
+- Two bonded phones with central mode on usually end up linked twice, because each auto-connects to the other's server. A peer only gets `disconnected` once neither link is left (`emitDisconnectedIfUnlinked`).
 - `BluetoothBootReceiver` sends `ACTION_RESTORE` on boot.
 - `BleEventBus` is a process-wide singleton. It posts events to the Flutter `EventSink` on the main looper, and it drops events while no Flutter listener is attached.
 - Automatic reconnects (on restore and on scan results) only target **bonded** devices.
@@ -52,6 +55,7 @@ When you add a method or event, update `lib/main.dart` (`BleAppController._invok
 
 This is scaffolding in progress on branch `copilot/implement-bluetooth-background-messaging`. Android↔Android messaging works end to end (verified on two Galaxy phones): the central writes to the peripheral's message characteristic, and the peripheral replies with notifications on the same link. Keep these gaps in mind:
 - Android hosts the GATT server (opened together with advertising). iOS still doesn't, so an Android central can't talk to an iOS peripheral.
-- Unbonded Android peers advertise and connect with rotating resolvable private addresses, so the same phone shows up under a new `deviceId` after a restart or every ~15 minutes, and saved devices go stale. The peripheral side also sees the central under a different address than the one it advertises with, and without a name (`(Unknown)`).
+- Registered devices saved before bonding was added (random addresses) stay in the list as stale entries. There's no UI to remove a registered device.
+- Unbonded centrals (e.g. iOS) can still subscribe to the Android GATT server, because the characteristic doesn't require encryption. They're registered under their rotating random address.
 - `BleEventBus` drops events while no Flutter listener is attached, so messages received while the activity is destroyed are lost. Connection state is replayed on `initialize` (`ACTION_RESTORE`), but message history isn't.
 - `BLUETOOTH_SCAN` must keep `neverForLocation`. Without it, Android 12+ silently delivers zero scan results because the app doesn't hold location permission.

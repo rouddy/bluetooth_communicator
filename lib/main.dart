@@ -334,7 +334,10 @@ class _DeviceControlPageState extends State<DeviceControlPage> {
               onPressed: isConnected
                   ? null
                   : () {
-                      widget.controller.connectDevice(widget.device.identifier);
+                      widget.controller.connectDevice(
+                        widget.device.identifier,
+                        pair: true,
+                      );
                     },
               child: Text(isConnected ? '연결됨' : '연결'),
             ),
@@ -533,8 +536,10 @@ class BleAppController extends ChangeNotifier {
     await _invoke('scanNow');
   }
 
-  Future<void> connectDevice(String deviceId) async {
-    await _invoke('connectDevice', {'deviceId': deviceId});
+  /// [pair] allows the native side to start bonding (system pairing dialog) when
+  /// the device isn't bonded yet. Only pass it for user-initiated connects.
+  Future<void> connectDevice(String deviceId, {bool pair = false}) async {
+    await _invoke('connectDevice', {'deviceId': deviceId, 'pair': pair});
   }
 
   Future<void> registerDevice(BleDevice device) async {

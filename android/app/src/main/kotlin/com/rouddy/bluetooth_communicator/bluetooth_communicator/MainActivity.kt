@@ -72,7 +72,8 @@ class MainActivity : FlutterActivity() {
                         val deviceId = call.argument<String>("deviceId")
                         startServiceAction(
                             BluetoothBackgroundService.ACTION_CONNECT_DEVICE,
-                            deviceId
+                            deviceId,
+                            pair = call.argument<Boolean>("pair") == true
                         )
                         result.success(null)
                     }
@@ -162,7 +163,8 @@ class MainActivity : FlutterActivity() {
     private fun startServiceAction(
         action: String,
         deviceId: String? = null,
-        message: String? = null
+        message: String? = null,
+        pair: Boolean = false
     ) {
         if (!hasRequiredPermissions()) {
             BleEventBus.emit(
@@ -181,6 +183,9 @@ class MainActivity : FlutterActivity() {
             }
             if (message != null) {
                 putExtra(BluetoothBackgroundService.EXTRA_MESSAGE, message)
+            }
+            if (pair) {
+                putExtra(BluetoothBackgroundService.EXTRA_PAIR, true)
             }
         }
         try {

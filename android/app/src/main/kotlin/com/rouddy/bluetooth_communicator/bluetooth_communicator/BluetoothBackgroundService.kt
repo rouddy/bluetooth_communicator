@@ -6,6 +6,8 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
+import android.content.BroadcastReceiver
+import android.content.IntentFilter
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
@@ -55,6 +57,7 @@ class BluetoothBackgroundService : Service() {
     private val activeConnections = ConcurrentHashMap<String, BluetoothGatt>()
     private val writableCharacteristics = ConcurrentHashMap<String, BluetoothGattCharacteristic>()
     private val connectingAddresses = ConcurrentHashMap.newKeySet<String>()
+    private val pendingBondAddresses = ConcurrentHashMap.newKeySet<String>()
 
     @Volatile
     private var gattServer: BluetoothGattServer? = null
@@ -82,6 +85,14 @@ class BluetoothBackgroundService : Service() {
         super.onCreate()
         createNotificationChannel()
         startForegroundSafely()
+        ContextCompat.registerReceiver(
+            this,
+            bondStateReceiver,
+            IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED),
+            // Sent by the Bluetooth app rather than the system uid, so NOT_EXPORTED
+            // receivers never get it.
+            ContextCompat.RECEIVER_EXPORTED
+        )
     }
 
     private fun startForegroundSafely() {
@@ -134,7 +145,10 @@ class BluetoothBackgroundService : Service() {
                 disconnectAll()
             }
             ACTION_SCAN_NOW -> startScan()
-            ACTION_CONNECT_DEVICE -> connectDevice(intent.getStringExtra(EXTRA_DEVICE_ID))
+            ACTION_CONNECT_DEVICE -> connectDevice(
+                intent.getStringExtra(EXTRA_DEVICE_ID),
+                intent.getBooleanExtra(EXTRA_PAIR, false)
+            )
             ACTION_SEND_MESSAGE -> {
                 val deviceId = intent.getStringExtra(EXTRA_DEVICE_ID)
                 val message = intent.getStringExtra(EXTRA_MESSAGE)
@@ -156,6 +170,7 @@ class BluetoothBackgroundService : Service() {
         stopAdvertising()
         stopScan()
         disconnectAll()
+        runCatching { unregisterReceiver(bondStateReceiver) }
         super.onDestroy()
     }
 
@@ -292,12 +307,7 @@ class BluetoothBackgroundService : Service() {
         preparedWrites.clear()
         centrals.forEach { central ->
             runCatching { server.cancelConnection(central) }
-            BleEventBus.emit(
-                mapOf(
-                    "type" to "disconnected",
-                    "deviceId" to central.address
-                )
-            )
+            emitDisconnectedIfUnlinked(central.address)
         }
         runCatching { server.close() }
     }
@@ -327,12 +337,35 @@ class BluetoothBackgroundService : Service() {
     }
 
     @SuppressLint("MissingPermission")
-    private fun connectDevice(deviceId: String?) {
+    private fun connectDevice(deviceId: String?, pair: Boolean) {
         if (deviceId.isNullOrBlank() || !hasBlePermissions()) {
             return
         }
         val device = runCatching { adapter?.getRemoteDevice(deviceId) }.getOrNull() ?: return
-        connectGattIfNeeded(device)
+        when {
+            device.bondState == BluetoothDevice.BOND_BONDED -> connectGattIfNeeded(device)
+            // Only a user-initiated connect may show the system pairing dialog;
+            // replaying saved devices on launch must not.
+            pair -> bondDevice(device)
+        }
+    }
+
+    // Unbonded phones advertise with rotating random addresses, so the same peer would
+    // get a new deviceId every few minutes. Bonding exchanges identity keys, after which
+    // the stack resolves the peer to one stable address.
+    @SuppressLint("MissingPermission")
+    private fun bondDevice(device: BluetoothDevice) {
+        val address = device.address ?: return
+        if (!pendingBondAddresses.add(address)) {
+            return
+        }
+        if (device.bondState == BluetoothDevice.BOND_BONDING) {
+            return
+        }
+        if (!device.createBond()) {
+            pendingBondAddresses.remove(address)
+            emitError("Pairing with $address could not be started")
+        }
     }
 
     @SuppressLint("MissingPermission")
@@ -361,12 +394,7 @@ class BluetoothBackgroundService : Service() {
                 it.close()
             }
             // close() unregisters the callback, so onConnectionStateChange won't report this.
-            BleEventBus.emit(
-                mapOf(
-                    "type" to "disconnected",
-                    "deviceId" to it.device.address
-                )
-            )
+            emitDisconnectedIfUnlinked(it.device.address)
         }
     }
 
@@ -429,6 +457,20 @@ class BluetoothBackgroundService : Service() {
         )
     }
 
+    // Two bonded phones that both run central mode end up linked twice (each is the
+    // other's central), so a peer only counts as disconnected once neither link is left.
+    private fun emitDisconnectedIfUnlinked(address: String) {
+        if (activeConnections.containsKey(address) || subscribedCentrals.containsKey(address)) {
+            return
+        }
+        BleEventBus.emit(
+            mapOf(
+                "type" to "disconnected",
+                "deviceId" to address
+            )
+        )
+    }
+
     private fun emitError(message: String) {
         BleEventBus.emit(
             mapOf(
@@ -439,7 +481,7 @@ class BluetoothBackgroundService : Service() {
     }
 
     private fun emitStatus() {
-        val connectionCount = activeConnections.size + subscribedCentrals.size
+        val connectionCount = (activeConnections.keys + subscribedCentrals.keys).size
         val status = when {
             connectionCount > 0 -> {
                 buildString {
@@ -598,12 +640,7 @@ class BluetoothBackgroundService : Service() {
                     if (!wasConnected && status != BluetoothGatt.GATT_SUCCESS) {
                         emitError("Connection to $address failed (status $status)")
                     }
-                    BleEventBus.emit(
-                        mapOf(
-                            "type" to "disconnected",
-                            "deviceId" to address
-                        )
-                    )
+                    emitDisconnectedIfUnlinked(address)
                     if (
                         isCentralEnabled &&
                         gatt.device.bondState == BluetoothDevice.BOND_BONDED &&
@@ -682,6 +719,33 @@ class BluetoothBackgroundService : Service() {
         }
     }
 
+    private val bondStateReceiver = object : BroadcastReceiver() {
+        @SuppressLint("MissingPermission")
+        override fun onReceive(context: Context, intent: Intent) {
+            val device = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
+            } else {
+                @Suppress("DEPRECATION")
+                intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
+            } ?: return
+            val address = device.address ?: return
+            val state = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.ERROR)
+            if (!pendingBondAddresses.contains(address)) {
+                return
+            }
+            when (state) {
+                BluetoothDevice.BOND_BONDED -> {
+                    pendingBondAddresses.remove(address)
+                    connectGattIfNeeded(device)
+                }
+                BluetoothDevice.BOND_NONE -> {
+                    pendingBondAddresses.remove(address)
+                    emitError("Pairing with $address failed")
+                }
+            }
+        }
+    }
+
     // Peripheral role: a remote central writes messages to our characteristic and
     // subscribes to it to receive our replies as notifications.
     private val gattServerCallback = object : BluetoothGattServerCallback() {
@@ -695,12 +759,7 @@ class BluetoothBackgroundService : Service() {
             centralMtus.remove(address)
             preparedWrites.remove(address)
             if (subscribedCentrals.remove(address) != null) {
-                BleEventBus.emit(
-                    mapOf(
-                        "type" to "disconnected",
-                        "deviceId" to address
-                    )
-                )
+                emitDisconnectedIfUnlinked(address)
                 emitStatus()
             }
         }
@@ -787,12 +846,16 @@ class BluetoothBackgroundService : Service() {
                     subscribedCentrals.remove(address) != null
                 }
                 if (changed) {
-                    BleEventBus.emit(
-                        mapOf(
-                            "type" to if (subscribed) "connected" else "disconnected",
-                            "deviceId" to address
+                    if (subscribed) {
+                        BleEventBus.emit(
+                            mapOf(
+                                "type" to "connected",
+                                "deviceId" to address
+                            )
                         )
-                    )
+                    } else {
+                        emitDisconnectedIfUnlinked(address)
+                    }
                     emitStatus()
                 }
             }
@@ -814,6 +877,7 @@ class BluetoothBackgroundService : Service() {
 
         const val EXTRA_DEVICE_ID = "extra.device.id"
         const val EXTRA_MESSAGE = "extra.message"
+        const val EXTRA_PAIR = "extra.pair"
 
         private const val PREFS_NAME = "ble_service_prefs"
         private const val PREF_ADVERTISING = "pref_advertising"
