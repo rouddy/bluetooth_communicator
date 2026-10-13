@@ -254,7 +254,11 @@ class BluetoothBackgroundService : Service() {
             return
         }
         connectingAddresses.add(address)
-        device.connectGatt(this, true, gattCallback, BluetoothDevice.TRANSPORT_LE)
+        // Background (autoConnect) connections only work with identity addresses.
+        // Unbonded peers advertise with a resolvable private address, which the stack
+        // rejects for background connect (status 133/135), so connect directly instead.
+        val autoConnect = device.bondState == BluetoothDevice.BOND_BONDED
+        device.connectGatt(this, autoConnect, gattCallback, BluetoothDevice.TRANSPORT_LE)
     }
 
     @SuppressLint("MissingPermission")
@@ -296,6 +300,15 @@ class BluetoothBackgroundService : Service() {
             characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
             gatt.writeCharacteristic(characteristic)
         }
+    }
+
+    private fun emitError(message: String) {
+        BleEventBus.emit(
+            mapOf(
+                "type" to "error",
+                "message" to message
+            )
+        )
     }
 
     private fun emitStatus() {
@@ -446,16 +459,23 @@ class BluetoothBackgroundService : Service() {
                 }
                 android.bluetooth.BluetoothProfile.STATE_DISCONNECTED -> {
                     connectingAddresses.remove(address)
-                    activeConnections.remove(address)
+                    val wasConnected = activeConnections.remove(address) != null
                     writableCharacteristics.remove(address)
                     runCatching { gatt.close() }
+                    if (!wasConnected && status != BluetoothGatt.GATT_SUCCESS) {
+                        emitError("Connection to $address failed (status $status)")
+                    }
                     BleEventBus.emit(
                         mapOf(
                             "type" to "disconnected",
                             "deviceId" to address
                         )
                     )
-                    if (isCentralEnabled && loadRegisteredDeviceIds().contains(address)) {
+                    if (
+                        isCentralEnabled &&
+                        gatt.device.bondState == BluetoothDevice.BOND_BONDED &&
+                        loadRegisteredDeviceIds().contains(address)
+                    ) {
                         connectGattIfNeeded(gatt.device)
                     }
                 }
