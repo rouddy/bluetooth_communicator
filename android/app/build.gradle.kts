@@ -6,7 +6,9 @@ plugins {
 
 android {
     namespace = "com.rouddy.bluetooth_communicator.bluetooth_communicator"
-    compileSdk = flutter.compileSdkVersion
+    // permission_handler_android 14.x requires compiling against API 37. This only
+    // affects which APIs are visible at compile time; runtime behavior follows targetSdk.
+    compileSdk = 37
     ndkVersion = flutter.ndkVersion
 
     compileOptions {

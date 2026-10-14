@@ -3,8 +3,6 @@ package com.rouddy.bluetooth_communicator.bluetooth_communicator
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.os.Build
-import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -14,8 +12,6 @@ import io.flutter.plugin.common.MethodChannel
 class MainActivity : FlutterActivity() {
     private val methodChannelName = "com.rouddy.bluetooth_communicator/bluetooth_control"
     private val eventChannelName = "com.rouddy.bluetooth_communicator/bluetooth_events"
-    private val permissionRequestCode = 1001
-    private var pendingPermissionResult: MethodChannel.Result? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -23,23 +19,14 @@ class MainActivity : FlutterActivity() {
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, methodChannelName)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
+                    // Dart requests the runtime permissions (permission_handler) before
+                    // calling this; returns false if they still aren't granted.
                     "initialize" -> {
-                        if (hasRequiredPermissions()) {
+                        if (hasBlePermissions()) {
                             startServiceAction(BluetoothBackgroundService.ACTION_RESTORE)
                             result.success(true)
                         } else {
-                            requestRequiredPermissions(result)
-                        }
-                    }
-                    "checkPermissions" -> {
-                        result.success(hasRequiredPermissions())
-                    }
-                    "requestPermissions" -> {
-                        if (hasRequiredPermissions()) {
-                            startServiceAction(BluetoothBackgroundService.ACTION_RESTORE)
-                            result.success(true)
-                        } else {
-                            requestRequiredPermissions(result)
+                            result.success(false)
                         }
                     }
                     "setAdvertisingEnabled" -> {
@@ -103,57 +90,16 @@ class MainActivity : FlutterActivity() {
             })
     }
 
-    private fun hasRequiredPermissions(): Boolean {
-        val permissions = getRequiredPermissions()
-        return permissions.all {
-            ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
-        }
-    }
-
-    private fun getRequiredPermissions(): List<String> {
-        val list = mutableListOf(
+    // Notification permission is deliberately not required: the foreground service runs
+    // without it, only its notification is hidden.
+    private fun hasBlePermissions(): Boolean {
+        val permissions = listOf(
             Manifest.permission.BLUETOOTH_SCAN,
             Manifest.permission.BLUETOOTH_CONNECT,
             Manifest.permission.BLUETOOTH_ADVERTISE
         )
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            list.add(Manifest.permission.POST_NOTIFICATIONS)
-        }
-        return list
-    }
-
-    private fun requestRequiredPermissions(result: MethodChannel.Result?) {
-        val missingPermissions = getRequiredPermissions().filter {
-            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
-        }
-        if (missingPermissions.isEmpty()) {
-            startServiceAction(BluetoothBackgroundService.ACTION_RESTORE)
-            result?.success(true)
-            return
-        }
-        pendingPermissionResult = result
-        ActivityCompat.requestPermissions(
-            this,
-            missingPermissions.toTypedArray(),
-            permissionRequestCode
-        )
-    }
-
-    override fun onRequestPermissionsResult(
-        requestCode: Int,
-        permissions: Array<out String>,
-        grantResults: IntArray
-    ) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == permissionRequestCode) {
-            val allGranted = grantResults.isNotEmpty() && grantResults.all {
-                it == PackageManager.PERMISSION_GRANTED
-            }
-            if (allGranted) {
-                startServiceAction(BluetoothBackgroundService.ACTION_RESTORE)
-            }
-            pendingPermissionResult?.success(allGranted)
-            pendingPermissionResult = null
+        return permissions.all {
+            ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
         }
     }
 
@@ -163,11 +109,11 @@ class MainActivity : FlutterActivity() {
         message: String? = null,
         pair: Boolean = false
     ) {
-        if (!hasRequiredPermissions()) {
+        if (!hasBlePermissions()) {
             BleEventBus.emit(
                 mapOf(
                     "type" to "error",
-                    "message" to "Cannot start service: BLE or Notification permissions are missing."
+                    "message" to "Cannot start service: Bluetooth permissions are missing."
                 )
             )
             return

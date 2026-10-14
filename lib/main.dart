@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' show Platform;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 const String _bleChannelName =
@@ -193,11 +195,27 @@ class SettingsPage extends StatelessWidget {
           ),
           ListTile(
             leading: const Icon(Icons.security),
-            title: const Text('권한 요청'),
-            subtitle: const Text('Bluetooth 및 알림 권한 허용'),
+            title: Text(
+              controller.permissionsPermanentlyDenied ? '권한 설정 열기' : '권한 요청',
+            ),
+            subtitle: Text(
+              controller.permissionsGranted
+                  ? 'Bluetooth 권한 허용됨'
+                  : controller.permissionsPermanentlyDenied
+                  ? '거부된 권한은 시스템 설정에서 허용해야 합니다'
+                  : 'Bluetooth 및 알림 권한 허용',
+            ),
             onTap: () async {
-              final granted = await controller.requestPermissions();
-              if (granted) {
+              // Re-check first: the user may have granted them in system settings.
+              if (await controller.checkPermissions()) {
+                await controller.initialize();
+                return;
+              }
+              if (controller.permissionsPermanentlyDenied) {
+                await openAppSettings();
+                return;
+              }
+              if (await controller.requestPermissions()) {
                 await controller.initialize();
               }
             },
@@ -413,6 +431,8 @@ class BleAppController extends ChangeNotifier {
   bool centralEnabled = false;
   String backgroundStatus = 'idle';
   String? lastError;
+  bool permissionsGranted = false;
+  bool permissionsPermanentlyDenied = false;
 
   final List<BleDevice> discoveredDevices = <BleDevice>[];
   final List<BleDevice> registeredDevices = <BleDevice>[];
@@ -466,24 +486,42 @@ class BleAppController extends ChangeNotifier {
     return history;
   }
 
+  /// Permissions the native side needs before it can advertise, scan, or connect.
+  static List<Permission> get _blePermissions => Platform.isIOS
+      ? const [Permission.bluetooth]
+      : const [
+          Permission.bluetoothScan,
+          Permission.bluetoothConnect,
+          Permission.bluetoothAdvertise,
+        ];
+
   Future<bool> checkPermissions() async {
-    try {
-      final bool? granted = await _methodChannel.invokeMethod<bool>('checkPermissions');
-      return granted ?? false;
-    } on PlatformException catch (_) {
-      return false;
-    }
+    final statuses = await Future.wait(_blePermissions.map((p) => p.status));
+    _updatePermissionState(statuses);
+    notifyListeners();
+    return permissionsGranted;
   }
 
+  /// Requests the Bluetooth permissions, plus notifications on Android. The
+  /// notification permission is optional: the foreground service runs without
+  /// it, only its notification is hidden.
   Future<bool> requestPermissions() async {
-    try {
-      final bool? granted = await _methodChannel.invokeMethod<bool>('requestPermissions');
-      return granted ?? false;
-    } on PlatformException catch (error) {
-      lastError = '${error.code}: ${error.message}';
-      notifyListeners();
-      return false;
-    }
+    final statuses = await [
+      ..._blePermissions,
+      if (Platform.isAndroid) Permission.notification,
+    ].request();
+    _updatePermissionState(
+      _blePermissions.map((p) => statuses[p] ?? PermissionStatus.denied),
+    );
+    notifyListeners();
+    return permissionsGranted;
+  }
+
+  void _updatePermissionState(Iterable<PermissionStatus> statuses) {
+    permissionsGranted = statuses.every((status) => status.isGranted);
+    permissionsPermanentlyDenied = statuses.any(
+      (status) => status.isPermanentlyDenied,
+    );
   }
 
   Future<void> initialize() async {
@@ -496,12 +534,14 @@ class BleAppController extends ChangeNotifier {
         notifyListeners();
       },
     );
-    final hasPermission = await checkPermissions();
-    if (!hasPermission) {
-      await requestPermissions();
-    } else {
-      await _invoke('initialize');
+    final granted = await checkPermissions() || await requestPermissions();
+    if (!granted) {
+      lastError = 'Bluetooth 권한이 없어 기기 검색과 연결을 할 수 없습니다.';
+      notifyListeners();
+      return;
     }
+    lastError = null;
+    await _invoke('initialize');
     if (advertisingEnabled) {
       await _invoke('setAdvertisingEnabled', {'enabled': true});
     }
