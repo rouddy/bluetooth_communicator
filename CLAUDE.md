@@ -54,12 +54,13 @@ When you add a method or event, update `lib/main.dart` (`BleAppController._invok
 ### iOS (`ios/Runner/AppDelegate.swift`)
 
 - `IOSBleBackgroundManager` handles the channel stream directly and owns a `CBCentralManager` and a `CBPeripheralManager`. Both use state-restoration identifiers, and `UIBackgroundModes` includes `bluetooth-central` and `bluetooth-peripheral`. It saves its toggles in `UserDefaults` (`pref_ios_advertising`, `pref_ios_central`).
+- Peripheral role: `IOSBleBackgroundManager` publishes a `CBMutableService` with the message characteristic (write, writeWithoutResponse, notify) and starts advertising from `didAdd`. Writes become `message` events, and a subscription becomes `connected`. `sendMessage` to a subscribed central uses `updateValue`, queueing when the transmit queue is full until `peripheralManagerIsReady`. Turning advertising off removes the service, and Bluetooth power-off resets the peripheral state.
 - The app uses the UIScene lifecycle (`SceneDelegate.swift`). So `window` is still nil in `didFinishLaunchingWithOptions`, and both the plugins and the BLE channels are registered in `didInitializeImplicitFlutterEngine` (`FlutterImplicitEngineDelegate`) on `engineBridge.applicationRegistrar.messenger()`.
 
 ## Current state / known gaps
 
 This is scaffolding in progress on branch `copilot/implement-bluetooth-background-messaging`. Android↔Android messaging works end to end (verified on two Galaxy phones): the central writes to the peripheral's message characteristic, and the peripheral replies with notifications on the same link. Keep these gaps in mind:
-- Android hosts the GATT server (opened together with advertising). iOS still doesn't, so an Android central can't talk to an iOS peripheral.
+- Both platforms host the message GATT server alongside advertising. Verified: Android ↔ Android, and Android central (S23) ↔ iOS peripheral (AlgorigoSE, `integration_test/peripheral_exchange_test.dart`). iOS central ↔ Android peripheral and iOS ↔ iOS are untested.
 - Registered devices saved before bonding was added (random addresses) stay in the list as stale entries. There's no UI to remove a registered device.
 - Unbonded centrals (e.g. iOS) can still subscribe to the Android GATT server, because the characteristic doesn't require encryption. They're registered under their rotating random address.
 - `BleEventBus` drops events while no Flutter listener is attached, so messages received while the activity is destroyed are lost. Connection state is replayed on `initialize` (`ACTION_RESTORE`), but message history isn't.

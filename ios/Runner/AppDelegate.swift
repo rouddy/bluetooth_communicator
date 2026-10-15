@@ -100,6 +100,14 @@ final class IOSBleBackgroundManager: NSObject, FlutterStreamHandler {
   private var advertisingEnabled = false
   private var centralEnabled = false
 
+  // Peripheral role: the message service that remote centrals write to and subscribe
+  // to for our replies (mirrors the Android GATT server).
+  private var messageCharacteristic: CBMutableCharacteristic?
+  private var serviceAdded = false
+  private var addingService = false
+  private var subscribedCentrals: [UUID: CBCentral] = [:]
+  private var pendingNotifications: [(data: Data, central: CBCentral)] = []
+
   func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
     eventSink = events
     emit(type: "status", payload: ["status": "ios-ready"])
@@ -129,6 +137,7 @@ final class IOSBleBackgroundManager: NSObject, FlutterStreamHandler {
       startAdvertisingIfPossible()
     } else {
       peripheralManager.stopAdvertising()
+      removeMessageService()
       emit(type: "status", payload: ["status": "advertising-off"])
     }
   }
@@ -159,17 +168,16 @@ final class IOSBleBackgroundManager: NSObject, FlutterStreamHandler {
   }
 
   func sendMessage(deviceId: String?, message: String?) {
-    guard
-      let deviceId,
-      let message,
-      let uuid = UUID(uuidString: deviceId),
-      let peripheral = peripherals[uuid],
-      let characteristic = writableCharacteristics[uuid]
-    else {
+    guard let deviceId, let message, let uuid = UUID(uuidString: deviceId) else {
       emit(type: "error", payload: ["message": "No writable BLE connection"])
       return
     }
     let data = Data(message.utf8)
+    guard let peripheral = peripherals[uuid], let characteristic = writableCharacteristics[uuid] else {
+      // Not our GATT client link; the peer may be a central subscribed to our service.
+      notifyCentral(uuid, data: data)
+      return
+    }
     if characteristic.properties.contains(.write) {
       peripheral.writeValue(data, for: characteristic, type: .withResponse)
     } else if characteristic.properties.contains(.writeWithoutResponse) {
@@ -179,13 +187,79 @@ final class IOSBleBackgroundManager: NSObject, FlutterStreamHandler {
     }
   }
 
+  private func notifyCentral(_ id: UUID, data: Data) {
+    guard let central = subscribedCentrals[id], let characteristic = messageCharacteristic else {
+      emit(type: "error", payload: ["message": "No writable BLE connection for \(id.uuidString)"])
+      return
+    }
+    // A notification can't be split, so it must fit in a single ATT packet.
+    let maxLength = central.maximumUpdateValueLength
+    if data.count > maxLength {
+      emit(type: "error", payload: ["message": "Message too long (\(data.count)/\(maxLength) bytes)"])
+      return
+    }
+    // Keep the order: once something is queued, everything after it queues too.
+    if !pendingNotifications.isEmpty ||
+      !peripheralManager.updateValue(data, for: characteristic, onSubscribedCentrals: [central]) {
+      // The transmit queue is full; peripheralManagerIsReady(toUpdateSubscribers:) retries.
+      pendingNotifications.append((data: data, central: central))
+    }
+  }
+
   private func startAdvertisingIfPossible() {
     guard peripheralManager.state == .poweredOn else { return }
+    guard serviceAdded else {
+      // Advertising starts from didAdd once the service is published, so a central
+      // that connects right away finds the characteristic.
+      addMessageServiceIfNeeded()
+      return
+    }
+    guard !peripheralManager.isAdvertising else { return }
     peripheralManager.startAdvertising([
       CBAdvertisementDataServiceUUIDsKey: [serviceUUID],
       CBAdvertisementDataLocalNameKey: UIDevice.current.name
     ])
-    emit(type: "status", payload: ["status": "advertising"])
+  }
+
+  private func addMessageServiceIfNeeded() {
+    guard !serviceAdded, !addingService else { return }
+    let characteristic = CBMutableCharacteristic(
+      type: messageCharacteristicUUID,
+      properties: [.write, .writeWithoutResponse, .notify],
+      value: nil,
+      permissions: [.writeable]
+    )
+    let service = CBMutableService(type: serviceUUID, primary: true)
+    service.characteristics = [characteristic]
+    messageCharacteristic = characteristic
+    addingService = true
+    peripheralManager.add(service)
+  }
+
+  private func removeMessageService() {
+    peripheralManager.removeAllServices()
+    resetPeripheralRole()
+  }
+
+  /// Forgets the published service and its subscribers, e.g. after advertising is
+  /// turned off or Bluetooth powers down (which drops published services).
+  private func resetPeripheralRole() {
+    serviceAdded = false
+    addingService = false
+    messageCharacteristic = nil
+    pendingNotifications.removeAll()
+    let centrals = Array(subscribedCentrals.keys)
+    subscribedCentrals.removeAll()
+    centrals.forEach { emitDisconnectedIfUnlinked($0) }
+  }
+
+  // A peer can be linked twice (we're its central and it's ours), so it only counts
+  // as disconnected once neither link is left.
+  private func emitDisconnectedIfUnlinked(_ id: UUID) {
+    if subscribedCentrals[id] != nil || peripherals[id]?.state == .connected {
+      return
+    }
+    emit(type: "disconnected", payload: ["deviceId": id.uuidString])
   }
 
   private func startScanningIfPossible() {
@@ -249,7 +323,7 @@ extension IOSBleBackgroundManager: CBCentralManagerDelegate {
     error: Error?
   ) {
     writableCharacteristics.removeValue(forKey: peripheral.identifier)
-    emit(type: "disconnected", payload: ["deviceId": peripheral.identifier.uuidString])
+    emitDisconnectedIfUnlinked(peripheral.identifier)
     if centralEnabled {
       central.connect(peripheral, options: nil)
     }
@@ -264,6 +338,7 @@ extension IOSBleBackgroundManager: CBPeripheralManagerDelegate {
         startAdvertisingIfPossible()
       }
     case .poweredOff:
+      resetPeripheralRole()
       emit(type: "status", payload: ["status": "bluetooth-off"])
     default:
       break
@@ -271,7 +346,93 @@ extension IOSBleBackgroundManager: CBPeripheralManagerDelegate {
   }
 
   func peripheralManager(_ peripheral: CBPeripheralManager, willRestoreState dict: [String: Any]) {
+    let services = dict[CBPeripheralManagerRestoredStateServicesKey] as? [CBMutableService] ?? []
+    let characteristic = services
+      .first { $0.uuid == serviceUUID }?
+      .characteristics?
+      .first { $0.uuid == messageCharacteristicUUID } as? CBMutableCharacteristic
+    if let characteristic {
+      messageCharacteristic = characteristic
+      serviceAdded = true
+      characteristic.subscribedCentrals?.forEach { subscribedCentrals[$0.identifier] = $0 }
+    }
     emit(type: "status", payload: ["status": "peripheral-restored"])
+  }
+
+  func peripheralManager(_ peripheral: CBPeripheralManager, didAdd service: CBService, error: Error?) {
+    addingService = false
+    if let error {
+      messageCharacteristic = nil
+      emit(type: "error", payload: ["message": "Failed to add GATT service: \(error.localizedDescription)"])
+      return
+    }
+    serviceAdded = true
+    if advertisingEnabled {
+      startAdvertisingIfPossible()
+    }
+  }
+
+  func peripheralManagerDidStartAdvertising(_ peripheral: CBPeripheralManager, error: Error?) {
+    if let error {
+      emit(type: "error", payload: ["message": "Advertising failed: \(error.localizedDescription)"])
+      return
+    }
+    emit(type: "status", payload: ["status": "advertising"])
+  }
+
+  func peripheralManager(
+    _ peripheral: CBPeripheralManager,
+    central: CBCentral,
+    didSubscribeTo characteristic: CBCharacteristic
+  ) {
+    guard characteristic.uuid == messageCharacteristicUUID else { return }
+    if subscribedCentrals.updateValue(central, forKey: central.identifier) == nil {
+      emit(type: "connected", payload: ["deviceId": central.identifier.uuidString])
+    }
+  }
+
+  func peripheralManager(
+    _ peripheral: CBPeripheralManager,
+    central: CBCentral,
+    didUnsubscribeFrom characteristic: CBCharacteristic
+  ) {
+    guard characteristic.uuid == messageCharacteristicUUID else { return }
+    if subscribedCentrals.removeValue(forKey: central.identifier) != nil {
+      pendingNotifications.removeAll { $0.central.identifier == central.identifier }
+      emitDisconnectedIfUnlinked(central.identifier)
+    }
+  }
+
+  func peripheralManager(_ peripheral: CBPeripheralManager, didReceiveWrite requests: [CBATTRequest]) {
+    guard let first = requests.first else { return }
+    guard requests.allSatisfy({ $0.characteristic.uuid == messageCharacteristicUUID }) else {
+      peripheral.respond(to: first, withResult: .requestNotSupported)
+      return
+    }
+    // A long (queued) write arrives as several requests in offset order, and
+    // CoreBluetooth expects one response for the whole batch.
+    var messages: [UUID: Data] = [:]
+    for request in requests {
+      messages[request.central.identifier, default: Data()].append(request.value ?? Data())
+    }
+    peripheral.respond(to: first, withResult: .success)
+    for (centralId, data) in messages {
+      guard let message = String(data: data, encoding: .utf8) else { continue }
+      emit(type: "message", payload: ["deviceId": centralId.uuidString, "message": message])
+    }
+  }
+
+  func peripheralManagerIsReady(toUpdateSubscribers peripheral: CBPeripheralManager) {
+    guard let characteristic = messageCharacteristic else {
+      pendingNotifications.removeAll()
+      return
+    }
+    while let next = pendingNotifications.first {
+      guard peripheral.updateValue(next.data, for: characteristic, onSubscribedCentrals: [next.central]) else {
+        return
+      }
+      pendingNotifications.removeFirst()
+    }
   }
 }
 

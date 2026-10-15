@@ -35,7 +35,9 @@
 - `initialize()`에서 예외가 나면 화면이 영원히 뜨지 않습니다(1번이 그 경우).
 - 수정 방향: `runApp()`을 먼저 호출하고, 초기화는 그 뒤에 비동기로 진행합니다. 초기화 중 상태와 실패 상태를 UI에 표시합니다.
 
-### 4. iOS에 GATT server가 없음 `코드`
+### 4. iOS에 GATT server가 없음 `코드` ✅ 해결
+- 해결: Android와 같은 characteristic(write, writeWithoutResponse, notify)을 가진 서비스를 등록하고, 서비스가 등록된 뒤에 광고를 시작합니다. write는 `message` 이벤트로, 구독은 `connected`로 처리하고, 답장은 notify로 보냅니다. 전송 큐가 가득 차면 다시 보냅니다. 광고 OFF·Bluetooth OFF·상태 복원도 처리합니다.
+- 확인: S23(Android central) ↔ AlgorigoSE(iOS peripheral)에서 `integration_test/peripheral_exchange_test.dart` 통과. 페어링, 연결, S23→iPhone `20261015`, iPhone→S23 `reply from peripheral 안녕`을 확인했습니다. iOS central ↔ Android peripheral 조합과 iOS ↔ iOS 조합은 아직 테스트하지 않았습니다.
 - iOS는 서비스 UUID를 광고만 하고 `CBMutableService`를 등록하지 않습니다.
 - 그래서 Android central → iOS peripheral 조합과 iOS ↔ iOS 조합에서는 메시지가 오가지 않습니다.
 - 수정 방향: Android와 같은 characteristic을 등록합니다(write, writeWithoutResponse, notify).
