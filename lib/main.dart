@@ -14,6 +14,11 @@ const String _bleEventsChannelName =
 const String _prefsAdvertisingEnabled = 'prefs_advertising_enabled';
 const String _prefsCentralEnabled = 'prefs_central_enabled';
 const String _prefsRegisteredDevices = 'prefs_registered_devices';
+const String _prefsMessages = 'prefs_messages';
+const String _prefsUnreadCounts = 'prefs_unread_counts';
+
+/// Messages kept per device in [_prefsMessages]; older ones are dropped.
+const int _storedMessagesPerDevice = 200;
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -710,6 +715,7 @@ class BleAppController extends ChangeNotifier {
     connectedDeviceIds.remove(deviceId);
     messagesByDevice.remove(deviceId);
     unreadCountByDevice.remove(deviceId);
+    _messagesChanged();
     // Save before disconnecting: the Android service reads this list to decide
     // whether to reconnect a dropped device.
     await _saveRegisteredDevices();
@@ -736,6 +742,7 @@ class BleAppController extends ChangeNotifier {
       status: MessageStatus.sending,
     );
     _appendMessage(deviceId, message);
+    _messagesChanged();
     notifyListeners();
     final accepted = await _invoke('sendMessage', {
       'deviceId': deviceId,
@@ -746,6 +753,7 @@ class BleAppController extends ChangeNotifier {
       message
         ..status = MessageStatus.failed
         ..error = lastError;
+      _messagesChanged();
       notifyListeners();
     }
   }
@@ -761,6 +769,7 @@ class BleAppController extends ChangeNotifier {
         message
           ..status = status
           ..error = event['error'] as String?;
+        _messagesChanged();
         return;
       }
     }
@@ -771,6 +780,7 @@ class BleAppController extends ChangeNotifier {
       return;
     }
     unreadCountByDevice.remove(deviceId);
+    _messagesChanged();
     notifyListeners();
   }
 
@@ -857,11 +867,21 @@ class BleAppController extends ChangeNotifier {
         final id = event['deviceId'] as String?;
         final message = event['message'] as String?;
         if (id != null && message != null) {
+          // Messages that waited natively while no listener was attached carry the
+          // time they actually arrived.
+          final receivedAt = event['receivedAt'] as int?;
           _appendMessage(
             id,
-            BleMessage(text: message, timestamp: DateTime.now(), outgoing: false),
+            BleMessage(
+              text: message,
+              timestamp: receivedAt == null
+                  ? DateTime.now()
+                  : DateTime.fromMillisecondsSinceEpoch(receivedAt),
+              outgoing: false,
+            ),
           );
           unreadCountByDevice[id] = (unreadCountByDevice[id] ?? 0) + 1;
+          _messagesChanged();
         }
         break;
       case 'messageSent':
@@ -899,6 +919,66 @@ class BleAppController extends ChangeNotifier {
           );
       }
     }
+    // initialize() can run again (permission retry); the in-memory history is newer
+    // than what's stored by then, and may hold messages still being sent.
+    if (!_messagesLoaded) {
+      _messagesLoaded = true;
+      _loadMessages(prefs);
+    }
+  }
+
+  bool _messagesLoaded = false;
+
+  void _loadMessages(SharedPreferences prefs) {
+    final messagesJson = prefs.getString(_prefsMessages);
+    if (messagesJson != null) {
+      final raw = jsonDecode(messagesJson);
+      if (raw is Map) {
+        raw.forEach((deviceId, items) {
+          if (deviceId is! String || items is! List) {
+            return;
+          }
+          messagesByDevice[deviceId] = [
+            for (final item in items.whereType<Map>())
+              BleMessage.fromJson(item.cast<String, dynamic>()),
+          ];
+        });
+      }
+    }
+    final unreadJson = prefs.getString(_prefsUnreadCounts);
+    if (unreadJson != null) {
+      final raw = jsonDecode(unreadJson);
+      if (raw is Map) {
+        raw.forEach((deviceId, count) {
+          if (deviceId is String && count is int) {
+            unreadCountByDevice[deviceId] = count;
+          }
+        });
+      }
+    }
+  }
+
+  void _messagesChanged() => unawaited(_saveMessages());
+
+  Future<void> _saveMessages() async {
+    final prefs = _prefs;
+    if (prefs == null) {
+      return;
+    }
+    await prefs.setString(
+      _prefsMessages,
+      jsonEncode({
+        for (final MapEntry(key: deviceId, value: messages)
+            in messagesByDevice.entries)
+          deviceId: [
+            for (final message in messages.length > _storedMessagesPerDevice
+                ? messages.sublist(messages.length - _storedMessagesPerDevice)
+                : messages)
+              message.toJson(),
+          ],
+      }),
+    );
+    await prefs.setString(_prefsUnreadCounts, jsonEncode(unreadCountByDevice));
   }
 
   Future<void> _saveRegisteredDevices() async {
@@ -953,6 +1033,31 @@ class BleMessage {
     this.status = MessageStatus.sent,
     this.error,
   });
+
+  /// Restores a stored message. One stored while it was still being sent comes
+  /// back as failed: the app stopped before native code reported the outcome.
+  factory BleMessage.fromJson(Map<String, dynamic> json) {
+    final status = MessageStatus.values.asNameMap()[json['status']] ??
+        MessageStatus.sent;
+    final interrupted = status == MessageStatus.sending;
+    return BleMessage(
+      id: json['id'] as String? ?? '',
+      text: json['text'] as String? ?? '',
+      timestamp: DateTime.fromMillisecondsSinceEpoch(json['timestamp'] as int? ?? 0),
+      outgoing: json['outgoing'] as bool? ?? false,
+      status: interrupted ? MessageStatus.failed : status,
+      error: interrupted ? '앱이 종료되어 전송 결과를 알 수 없습니다' : json['error'] as String?,
+    );
+  }
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+    'id': id,
+    'text': text,
+    'timestamp': timestamp.millisecondsSinceEpoch,
+    'outgoing': outgoing,
+    'status': status.name,
+    if (error != null) 'error': error,
+  };
 
   /// Identifies an outgoing message in native messageSent/messageFailed events.
   final String id;
