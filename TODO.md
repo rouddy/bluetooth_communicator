@@ -21,7 +21,9 @@
 - 다만 `_invoke()`는 여전히 `PlatformException`만 잡습니다. 채널이 등록되지 않으면(2번) `MissingPluginException`이 그대로 올라가서 `runApp()`을 막습니다.
 - 수정 방향: `_invoke()`의 catch 범위를 `MissingPluginException`까지 넓힙니다.
 
-### 2. iOS 채널 등록이 `window?.rootViewController`에 의존함 `추정`
+### 2. iOS 채널 등록이 `window?.rootViewController`에 의존함 `확인됨` ✅ 해결
+- 확인: AlgorigoSE(iOS 27.0.1)에서 `integration_test/app_test.dart`가 `Native Bluetooth channel unavailable (initialize)`와 EventChannel `listen`의 `MissingPluginException`으로 실패했습니다.
+- 해결: 채널을 `didInitializeImplicitFlutterEngine`에서 `engineBridge.applicationRegistrar.messenger()`로 등록합니다. 같은 테스트가 통과합니다.
 - UIScene 생명주기(`SceneDelegate` + `UISceneStoryboardFile`)에서는 `didFinishLaunchingWithOptions` 시점에 AppDelegate의 `window`가 nil일 가능성이 높습니다.
 - 그러면 `guard`에서 바로 return해서 MethodChannel과 EventChannel이 등록되지 않습니다.
 - 수정 방향: `didInitializeImplicitFlutterEngine(_:)`에서 `engineBridge.applicationRegistrar.messenger()`로 채널을 등록합니다.

@@ -12,13 +12,21 @@ import UIKit
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
-    guard let controller = window?.rootViewController as? FlutterViewController else {
-      return super.application(application, didFinishLaunchingWithOptions: launchOptions)
-    }
+    return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+  }
 
+  // With the UIScene lifecycle the window (and its FlutterViewController) doesn't
+  // exist yet in didFinishLaunchingWithOptions, so the channels are registered on
+  // the implicit engine's messenger instead.
+  func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
+    GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
+    registerBleChannels(messenger: engineBridge.applicationRegistrar.messenger())
+  }
+
+  private func registerBleChannels(messenger: FlutterBinaryMessenger) {
     let methodChannel = FlutterMethodChannel(
       name: methodChannelName,
-      binaryMessenger: controller.binaryMessenger
+      binaryMessenger: messenger
     )
     methodChannel.setMethodCallHandler { [weak self] call, result in
       guard let self = self else {
@@ -60,15 +68,9 @@ import UIKit
 
     let eventChannel = FlutterEventChannel(
       name: eventChannelName,
-      binaryMessenger: controller.binaryMessenger
+      binaryMessenger: messenger
     )
     eventChannel.setStreamHandler(bleManager)
-
-    return super.application(application, didFinishLaunchingWithOptions: launchOptions)
-  }
-
-  func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
-    GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
   }
 }
 

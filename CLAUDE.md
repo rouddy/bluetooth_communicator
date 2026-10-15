@@ -11,6 +11,7 @@ flutter test                         # all tests
 flutter test test/widget_test.dart   # single file
 flutter test --plain-name "App shows BLE tabs"   # single test by name
 flutter run                          # run on a connected device (BLE needs real hardware)
+flutter drive --driver=test_driver/integration_test.dart --target=integration_test/app_test.dart -d <device-id>   # on-device smoke test (`flutter test integration_test` can't launch on wireless iOS devices)
 flutter build apk / flutter build ios
 ```
 
@@ -53,7 +54,7 @@ When you add a method or event, update `lib/main.dart` (`BleAppController._invok
 ### iOS (`ios/Runner/AppDelegate.swift`)
 
 - `IOSBleBackgroundManager` handles the channel stream directly and owns a `CBCentralManager` and a `CBPeripheralManager`. Both use state-restoration identifiers, and `UIBackgroundModes` includes `bluetooth-central` and `bluetooth-peripheral`. It saves its toggles in `UserDefaults` (`pref_ios_advertising`, `pref_ios_central`).
-- Channels are registered in `didFinishLaunchingWithOptions` from `window?.rootViewController`, and plugins through `FlutterImplicitEngineDelegate`, because the app uses the UIScene lifecycle (`SceneDelegate.swift`).
+- The app uses the UIScene lifecycle (`SceneDelegate.swift`). So `window` is still nil in `didFinishLaunchingWithOptions`, and both the plugins and the BLE channels are registered in `didInitializeImplicitFlutterEngine` (`FlutterImplicitEngineDelegate`) on `engineBridge.applicationRegistrar.messenger()`.
 
 ## Current state / known gaps
 
