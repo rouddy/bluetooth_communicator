@@ -340,6 +340,56 @@ void main() {
     });
   });
 
+  group('nearby devices', () {
+    test('a device that stops being reported is dropped after the timeout', () async {
+      registerNativeHandler();
+      var now = DateTime(2026, 10, 16, 0, 0, 0);
+      final controller = BleAppController(clock: () => now);
+      await controller.initialize();
+      Future<void> seen(String id) => messenger.handlePlatformMessage(
+        _eventsChannel.name,
+        const StandardMethodCodec().encodeSuccessEnvelope({
+          'type': 'discovered',
+          'deviceId': id,
+          'name': 'Jump3',
+        }),
+        (_) {},
+      );
+
+      await seen('OLD');
+      await seen('NEW');
+      // Native code repeats devices that are still advertising every 30 s.
+      for (var i = 0; i < 4; i++) {
+        now = now.add(const Duration(seconds: 30));
+        await seen('NEW');
+        controller.pruneNearbyDevices();
+      }
+
+      expect(controller.discoveredDevices.map((d) => d.identifier), ['NEW']);
+    });
+
+    test('a device reported within the timeout stays', () async {
+      registerNativeHandler();
+      var now = DateTime(2026, 10, 16);
+      final controller = BleAppController(clock: () => now);
+      await controller.initialize();
+      await messenger.handlePlatformMessage(
+        _eventsChannel.name,
+        const StandardMethodCodec().encodeSuccessEnvelope({
+          'type': 'discovered',
+          'deviceId': 'AA',
+          'name': 'Peer',
+        }),
+        (_) {},
+      );
+
+      now = now.add(BleAppController.nearbyTimeout - const Duration(seconds: 1));
+      controller.pruneNearbyDevices();
+
+      expect(controller.discoveredDevices, hasLength(1));
+    });
+  });
+
   group('removeDevice', () {
     test('forgets the device, persists it, and disconnects it natively', () async {
       registerNativeHandler();

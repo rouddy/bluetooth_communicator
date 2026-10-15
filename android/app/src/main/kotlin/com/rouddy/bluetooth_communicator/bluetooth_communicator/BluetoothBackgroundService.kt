@@ -67,8 +67,9 @@ class BluetoothBackgroundService : Service() {
     // pending autoConnect would otherwise complete whenever the device shows up again.
     private val pendingConnections = ConcurrentHashMap<String, BluetoothGatt>()
     private val pendingBondAddresses = ConcurrentHashMap.newKeySet<String>()
-    // Nearby devices already reported to Dart, with the name they were reported under.
-    private val reportedNearby = ConcurrentHashMap<String, String>()
+    // Nearby devices already reported to Dart: the name they were reported under and
+    // when (elapsedRealtime).
+    private val reportedNearby = ConcurrentHashMap<String, Pair<String, Long>>()
 
     @Volatile
     private var gattServer: BluetoothGattServer? = null
@@ -864,8 +865,12 @@ class BluetoothBackgroundService : Service() {
             val address = device.address ?: return
             val name = result.scanRecord?.deviceName ?: device.name ?: ""
             // A peer advertises several times a second; each event rebuilt Dart UI. Report
-            // a device only when it's new or its name changed.
-            if (reportedNearby.put(address, name) != name) {
+            // a device when it's new or renamed, and otherwise every NEARBY_REFRESH_MS
+            // so Dart can drop devices that stopped advertising.
+            val now = SystemClock.elapsedRealtime()
+            val reported = reportedNearby[address]
+            if (reported == null || reported.first != name || now - reported.second >= NEARBY_REFRESH_MS) {
+                reportedNearby[address] = name to now
                 BleEventBus.emit(
                     mapOf(
                         "type" to "discovered",
@@ -1271,6 +1276,7 @@ class BluetoothBackgroundService : Service() {
         private const val MAX_ATTRIBUTE_LENGTH = 512
         private const val SCAN_RETRY_DELAY_MS = 30_000L
         private const val SCAN_MODE_DEBOUNCE_MS = 2_000L
+        private const val NEARBY_REFRESH_MS = 30_000L
         private val CLIENT_CONFIG_DESCRIPTOR_UUID =
             UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
     }

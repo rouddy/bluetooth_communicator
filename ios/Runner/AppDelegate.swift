@@ -368,6 +368,7 @@ final class IOSBleBackgroundManager: NSObject, FlutterStreamHandler {
     ])
     isScanning = true
     emitStatus()
+    scheduleScanRefresh()
   }
 
   private func emit(type: String, payload: [String: Any]) {
@@ -385,6 +386,25 @@ final class IOSBleBackgroundManager: NSObject, FlutterStreamHandler {
   }
 
   private var nowMillis: Int { Int(Date().timeIntervalSince1970 * 1000) }
+
+  private var scanRefreshTimer: Timer?
+
+  /// Without duplicates, a scan reports each peripheral once; restarting it every 30 s
+  /// in the foreground reports devices that are still there again, so Dart can drop
+  /// the ones that went away. (Background scans ignore duplicates anyway.)
+  private func scheduleScanRefresh() {
+    scanRefreshTimer?.invalidate()
+    scanRefreshTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+      guard let self, self.centralEnabled, self.isScanning,
+        UIApplication.shared.applicationState == .active,
+        self.centralManager.state == .poweredOn
+      else { return }
+      self.centralManager.stopScan()
+      self.centralManager.scanForPeripherals(withServices: [self.serviceUUID], options: [
+        CBCentralManagerScanOptionAllowDuplicatesKey: false
+      ])
+    }
+  }
 
   /// Same shape as the Android service's status: Dart builds the label from it.
   private func emitStatus() {

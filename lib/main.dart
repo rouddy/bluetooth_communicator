@@ -602,9 +602,38 @@ class _DeviceControlPageState extends State<DeviceControlPage>
 }
 
 class BleAppController extends ChangeNotifier {
-  BleAppController()
+  /// [clock] is for tests.
+  BleAppController({DateTime Function()? clock})
       : _methodChannel = const MethodChannel(_bleChannelName),
-        _eventChannel = const EventChannel(_bleEventsChannelName);
+        _eventChannel = const EventChannel(_bleEventsChannelName),
+        _clock = clock ?? DateTime.now;
+
+  final DateTime Function() _clock;
+
+  /// A nearby device is dropped when no scan result reported it for this long.
+  /// Native code repeats each device every 30 s while it's still advertising.
+  static const nearbyTimeout = Duration(seconds: 90);
+  final Map<String, DateTime> _lastSeen = <String, DateTime>{};
+  Timer? _pruneTimer;
+
+  /// Drops nearby devices that stopped advertising, e.g. an old random address of
+  /// a phone that has since been paired under a new one.
+  void pruneNearbyDevices() {
+    final cutoff = _clock().subtract(nearbyTimeout);
+    final before = discoveredDevices.length;
+    discoveredDevices.removeWhere((device) {
+      final seen = _lastSeen[device.identifier];
+      return seen == null || seen.isBefore(cutoff);
+    });
+    _lastSeen.removeWhere((id, seen) => seen.isBefore(cutoff));
+    if (discoveredDevices.isEmpty) {
+      _pruneTimer?.cancel();
+      _pruneTimer = null;
+    }
+    if (discoveredDevices.length != before) {
+      notifyListeners();
+    }
+  }
 
   final MethodChannel _methodChannel;
   final EventChannel _eventChannel;
@@ -759,6 +788,7 @@ class BleAppController extends ChangeNotifier {
   Future<void> _initialize() async {
     _prefs = await SharedPreferences.getInstance();
     _loadFromPrefs();
+
     await _eventsSubscription?.cancel();
     _eventsSubscription = _eventChannel.receiveBroadcastStream().listen(
       _handleEvent,
@@ -1038,6 +1068,12 @@ class BleAppController extends ChangeNotifier {
         break;
       case 'discovered':
         final device = BleDevice.fromMap(event);
+        _lastSeen[device.identifier] = _clock();
+        // Runs only while there's something to prune.
+        _pruneTimer ??= Timer.periodic(
+          const Duration(seconds: 15),
+          (_) => pruneNearbyDevices(),
+        );
         final index = discoveredDevices.indexWhere((d) => d.identifier == device.identifier);
         if (index >= 0) {
           discoveredDevices[index] = device;
@@ -1216,6 +1252,7 @@ class BleAppController extends ChangeNotifier {
   @override
   void dispose() {
     _eventsSubscription?.cancel();
+    _pruneTimer?.cancel();
     _errors.close();
     for (final timer in _connectTimeouts.values) {
       timer.cancel();
