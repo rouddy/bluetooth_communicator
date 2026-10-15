@@ -195,6 +195,29 @@ void main() {
     });
   });
 
+  test('a message delivered late keeps the time it arrived natively', () async {
+    registerNativeHandler();
+    final controller = BleAppController();
+    await controller.initialize();
+    final arrived = DateTime(2026, 10, 15, 16, 3, 53);
+
+    await messenger.handlePlatformMessage(
+      _eventsChannel.name,
+      const StandardMethodCodec().encodeSuccessEnvelope({
+        'type': 'message',
+        'deviceId': 'AA:AA',
+        'message': 'while closed',
+        'receivedAt': arrived.millisecondsSinceEpoch,
+      }),
+      (_) {},
+    );
+
+    final message = controller.messagesByDevice['AA:AA']!.single;
+    expect(message.text, 'while closed');
+    expect(message.timestamp, arrived);
+    expect(controller.unreadCountFor('AA:AA'), 1);
+  });
+
   group('removeDevice', () {
     test('forgets the device, persists it, and disconnects it natively', () async {
       registerNativeHandler();

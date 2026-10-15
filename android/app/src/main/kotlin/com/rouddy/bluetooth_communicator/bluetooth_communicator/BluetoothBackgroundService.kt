@@ -91,6 +91,7 @@ class BluetoothBackgroundService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        BleEventBus.init(this)
         createNotificationChannel()
         startForegroundSafely()
         ContextCompat.registerReceiver(
@@ -576,7 +577,8 @@ class BluetoothBackgroundService : Service() {
             mapOf(
                 "type" to "message",
                 "deviceId" to deviceId,
-                "message" to payload.toString(Charsets.UTF_8)
+                "message" to payload.toString(Charsets.UTF_8),
+                "receivedAt" to System.currentTimeMillis()
             )
         )
     }

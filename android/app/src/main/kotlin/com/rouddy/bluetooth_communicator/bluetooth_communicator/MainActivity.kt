@@ -15,6 +15,7 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        BleEventBus.init(this)
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, methodChannelName)
             .setMethodCallHandler { call, result ->
@@ -103,6 +104,14 @@ class MainActivity : FlutterActivity() {
                     BleEventBus.detach()
                 }
             })
+    }
+
+    // When the activity is destroyed its engine goes with it, but the event channel's
+    // onCancel isn't called, so BleEventBus would keep sending to a dead sink and the
+    // events (incoming messages) would vanish. Detach so they're kept instead.
+    override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
+        BleEventBus.detach()
+        super.cleanUpFlutterEngine(flutterEngine)
     }
 
     // Notification permission is deliberately not required: the foreground service runs

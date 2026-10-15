@@ -857,9 +857,18 @@ class BleAppController extends ChangeNotifier {
         final id = event['deviceId'] as String?;
         final message = event['message'] as String?;
         if (id != null && message != null) {
+          // Messages that waited natively while no listener was attached carry the
+          // time they actually arrived.
+          final receivedAt = event['receivedAt'] as int?;
           _appendMessage(
             id,
-            BleMessage(text: message, timestamp: DateTime.now(), outgoing: false),
+            BleMessage(
+              text: message,
+              timestamp: receivedAt == null
+                  ? DateTime.now()
+                  : DateTime.fromMillisecondsSinceEpoch(receivedAt),
+              outgoing: false,
+            ),
           );
           unreadCountByDevice[id] = (unreadCountByDevice[id] ?? 0) + 1;
         }
