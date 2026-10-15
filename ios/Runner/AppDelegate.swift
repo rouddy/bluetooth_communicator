@@ -63,7 +63,8 @@ import UIKit
         let args = call.arguments as? [String: Any]
         let deviceId = args?["deviceId"] as? String
         let message = args?["message"] as? String
-        self.bleManager.sendMessage(deviceId: deviceId, message: message)
+        let messageId = args?["messageId"] as? String
+        self.bleManager.sendMessage(deviceId: deviceId, message: message, messageId: messageId)
         result(nil)
       default:
         result(FlutterMethodNotImplemented)
@@ -116,7 +117,10 @@ final class IOSBleBackgroundManager: NSObject, FlutterStreamHandler {
   private var serviceAdded = false
   private var addingService = false
   private var subscribedCentrals: [UUID: CBCentral] = [:]
-  private var pendingNotifications: [(data: Data, central: CBCentral)] = []
+  private var pendingNotifications: [(data: Data, central: CBCentral, messageId: String?)] = []
+  // Message ids of writes with response, per peripheral, in the order CoreBluetooth
+  // reports them back through didWriteValueFor.
+  private var pendingWrites: [UUID: [String?]] = [:]
 
   func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
     eventSink = events
@@ -189,42 +193,81 @@ final class IOSBleBackgroundManager: NSObject, FlutterStreamHandler {
     // subscribed until the remote side disconnects.
   }
 
-  func sendMessage(deviceId: String?, message: String?) {
+  func sendMessage(deviceId: String?, message: String?, messageId: String?) {
     guard let deviceId, let message, let uuid = UUID(uuidString: deviceId) else {
-      emit(type: "error", payload: ["message": "No writable BLE connection"])
+      reportSend(deviceId: deviceId ?? "", messageId: messageId, error: "No writable BLE connection")
       return
     }
     let data = Data(message.utf8)
     guard let peripheral = peripherals[uuid], let characteristic = writableCharacteristics[uuid] else {
       // Not our GATT client link; the peer may be a central subscribed to our service.
-      notifyCentral(uuid, data: data)
+      notifyCentral(uuid, data: data, messageId: messageId)
       return
     }
     if characteristic.properties.contains(.write) {
+      let maxLength = peripheral.maximumWriteValueLength(for: .withResponse)
+      if data.count > maxLength {
+        reportSend(deviceId: deviceId, messageId: messageId, error: "Message too long (\(data.count)/\(maxLength) bytes)")
+        return
+      }
+      // CoreBluetooth queues writes itself and answers each in order.
+      pendingWrites[uuid, default: []].append(messageId)
       peripheral.writeValue(data, for: characteristic, type: .withResponse)
     } else if characteristic.properties.contains(.writeWithoutResponse) {
       peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
+      reportSend(deviceId: deviceId, messageId: messageId, error: nil)
     } else {
-      emit(type: "error", payload: ["message": "Characteristic not writable"])
+      reportSend(deviceId: deviceId, messageId: messageId, error: "Characteristic not writable")
     }
   }
 
-  private func notifyCentral(_ id: UUID, data: Data) {
+  private func notifyCentral(_ id: UUID, data: Data, messageId: String?) {
     guard let central = subscribedCentrals[id], let characteristic = messageCharacteristic else {
-      emit(type: "error", payload: ["message": "No writable BLE connection for \(id.uuidString)"])
+      reportSend(deviceId: id.uuidString, messageId: messageId, error: "No writable BLE connection for \(id.uuidString)")
       return
     }
     // A notification can't be split, so it must fit in a single ATT packet.
     let maxLength = central.maximumUpdateValueLength
     if data.count > maxLength {
-      emit(type: "error", payload: ["message": "Message too long (\(data.count)/\(maxLength) bytes)"])
+      reportSend(deviceId: id.uuidString, messageId: messageId, error: "Message too long (\(data.count)/\(maxLength) bytes)")
       return
     }
     // Keep the order: once something is queued, everything after it queues too.
-    if !pendingNotifications.isEmpty ||
-      !peripheralManager.updateValue(data, for: characteristic, onSubscribedCentrals: [central]) {
+    if pendingNotifications.isEmpty &&
+      peripheralManager.updateValue(data, for: characteristic, onSubscribedCentrals: [central]) {
+      reportSend(deviceId: id.uuidString, messageId: messageId, error: nil)
+    } else {
       // The transmit queue is full; peripheralManagerIsReady(toUpdateSubscribers:) retries.
-      pendingNotifications.append((data: data, central: central))
+      pendingNotifications.append((data: data, central: central, messageId: messageId))
+    }
+  }
+
+  /// Reports a send's outcome (`error == nil` means sent). Without a message id only
+  /// failures are reported, as a generic error.
+  private func reportSend(deviceId: String, messageId: String?, error: String?) {
+    guard let messageId else {
+      if let error {
+        emit(type: "error", payload: ["message": error])
+      }
+      return
+    }
+    if let error {
+      emit(type: "messageFailed", payload: ["deviceId": deviceId, "messageId": messageId, "error": error])
+    } else {
+      emit(type: "messageSent", payload: ["deviceId": deviceId, "messageId": messageId])
+    }
+  }
+
+  private func failPendingWrites(_ id: UUID, error: String) {
+    let ids = pendingWrites.removeValue(forKey: id) ?? []
+    ids.forEach { reportSend(deviceId: id.uuidString, messageId: $0, error: error) }
+  }
+
+  private func failPendingNotifications(where shouldFail: (CBCentral) -> Bool, error: String) {
+    let failed = pendingNotifications.filter { shouldFail($0.central) }
+    pendingNotifications.removeAll { shouldFail($0.central) }
+    failed.forEach {
+      reportSend(deviceId: $0.central.identifier.uuidString, messageId: $0.messageId, error: error)
     }
   }
 
@@ -269,7 +312,7 @@ final class IOSBleBackgroundManager: NSObject, FlutterStreamHandler {
     serviceAdded = false
     addingService = false
     messageCharacteristic = nil
-    pendingNotifications.removeAll()
+    failPendingNotifications(where: { _ in true }, error: "GATT service removed")
     let centrals = Array(subscribedCentrals.keys)
     subscribedCentrals.removeAll()
     centrals.forEach { emitDisconnectedIfUnlinked($0) }
@@ -317,6 +360,7 @@ extension IOSBleBackgroundManager: CBCentralManagerDelegate {
       let dropped = connectedPeripheralIds
       connectedPeripheralIds.removeAll()
       writableCharacteristics.removeAll()
+      Array(pendingWrites.keys).forEach { failPendingWrites($0, error: "Bluetooth turned off") }
       dropped.forEach { emitDisconnectedIfUnlinked($0) }
       emit(type: "status", payload: ["status": "bluetooth-off"])
     default:
@@ -358,6 +402,7 @@ extension IOSBleBackgroundManager: CBCentralManagerDelegate {
   ) {
     writableCharacteristics.removeValue(forKey: peripheral.identifier)
     connectedPeripheralIds.remove(peripheral.identifier)
+    failPendingWrites(peripheral.identifier, error: "Disconnected")
     emitDisconnectedIfUnlinked(peripheral.identifier)
     if centralEnabled && !forgottenPeripherals.contains(peripheral.identifier) {
       central.connect(peripheral, options: nil)
@@ -433,7 +478,7 @@ extension IOSBleBackgroundManager: CBPeripheralManagerDelegate {
   ) {
     guard characteristic.uuid == messageCharacteristicUUID else { return }
     if subscribedCentrals.removeValue(forKey: central.identifier) != nil {
-      pendingNotifications.removeAll { $0.central.identifier == central.identifier }
+      failPendingNotifications(where: { $0.identifier == central.identifier }, error: "Unsubscribed")
       emitDisconnectedIfUnlinked(central.identifier)
     }
   }
@@ -459,7 +504,7 @@ extension IOSBleBackgroundManager: CBPeripheralManagerDelegate {
 
   func peripheralManagerIsReady(toUpdateSubscribers peripheral: CBPeripheralManager) {
     guard let characteristic = messageCharacteristic else {
-      pendingNotifications.removeAll()
+      failPendingNotifications(where: { _ in true }, error: "GATT service removed")
       return
     }
     while let next = pendingNotifications.first {
@@ -467,6 +512,7 @@ extension IOSBleBackgroundManager: CBPeripheralManagerDelegate {
         return
       }
       pendingNotifications.removeFirst()
+      reportSend(deviceId: next.central.identifier.uuidString, messageId: next.messageId, error: nil)
     }
   }
 }
@@ -492,6 +538,19 @@ extension IOSBleBackgroundManager: CBPeripheralDelegate {
       writableCharacteristics[peripheral.identifier] = characteristic
       peripheral.setNotifyValue(true, for: characteristic)
     }
+  }
+
+  func peripheral(
+    _ peripheral: CBPeripheral,
+    didWriteValueFor characteristic: CBCharacteristic,
+    error: Error?
+  ) {
+    guard characteristic.uuid == messageCharacteristicUUID,
+      var ids = pendingWrites[peripheral.identifier], !ids.isEmpty
+    else { return }
+    let messageId = ids.removeFirst()
+    pendingWrites[peripheral.identifier] = ids
+    reportSend(deviceId: peripheral.identifier.uuidString, messageId: messageId, error: error?.localizedDescription)
   }
 
   func peripheral(

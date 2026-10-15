@@ -45,3 +45,22 @@ String backgroundStatus(WidgetTester tester) {
   );
   return (tile.subtitle! as Text).data!;
 }
+
+/// Turns on advertising and scanning in the settings page if they're off (a
+/// fresh install starts with both off), then returns to the device list.
+Future<void> ensureBleModesEnabled(WidgetTester tester) async {
+  await tester.tap(find.byIcon(Icons.settings));
+  await tester.pumpAndSettle();
+  for (final title in [
+    'Bluetooth peripheral advertising',
+    'Bluetooth device scan 및 연결',
+  ]) {
+    final toggle = find.widgetWithText(SwitchListTile, title);
+    if (!tester.widget<SwitchListTile>(toggle).value) {
+      await tester.tap(toggle);
+      await tester.pumpAndSettle();
+    }
+  }
+  await tester.pageBack();
+  await tester.pumpAndSettle();
+}

@@ -12,6 +12,7 @@ flutter test test/widget_test.dart   # single file
 flutter test --plain-name "App shows BLE tabs"   # single test by name
 flutter run                          # run on a connected device (BLE needs real hardware)
 flutter drive --driver=test_driver/integration_test.dart --target=integration_test/app_test.dart -d <device-id>   # on-device smoke test (`flutter test integration_test` can't launch on wireless iOS devices)
+cd android && ./gradlew :app:testDebugUnitTest   # Kotlin JVM unit tests
 flutter build apk / flutter build ios
 ```
 
@@ -23,11 +24,12 @@ This is a Flutter app for exchanging text messages between phones over BLE. Ever
 
 ### Platform channel contract (keep all three sides in sync)
 
-- **MethodChannel** `com.rouddy.bluetooth_communicator/bluetooth_control`. Methods: `initialize`, `setAdvertisingEnabled{enabled}`, `setCentralEnabled{enabled}`, `scanNow`, `connectDevice{deviceId, pair}`, `disconnectDevice{deviceId}`, `sendMessage{deviceId, message}`.
-- **EventChannel** `com.rouddy.bluetooth_communicator/bluetooth_events`. Each event is a flat map with a `type` key: `status{status}`, `discovered{deviceId, name}`, `connected{deviceId}`, `disconnected{deviceId}`, `message{deviceId, message}`, `error{message}`.
+- **MethodChannel** `com.rouddy.bluetooth_communicator/bluetooth_control`. Methods: `initialize`, `setAdvertisingEnabled{enabled}`, `setCentralEnabled{enabled}`, `scanNow`, `connectDevice{deviceId, pair}`, `disconnectDevice{deviceId}`, `sendMessage{deviceId, message, messageId}`.
+- **EventChannel** `com.rouddy.bluetooth_communicator/bluetooth_events`. Each event is a flat map with a `type` key: `status{status}`, `discovered{deviceId, name}`, `connected{deviceId}`, `disconnected{deviceId}`, `message{deviceId, message}`, `messageSent{deviceId, messageId}`, `messageFailed{deviceId, messageId, error}`, `error{message}`.
 - Shared GATT UUIDs are hard-coded on both native sides. Service `1F9ED31D-B738-4D4C-A6D8-86DBF0F9C001`, message characteristic `DB912050-2E4E-4C4E-A543-E89121E57595`. Messages are sent as raw UTF-8 bytes.
 - `initialize` returns `true` once it has started the background service, or `false` if the Bluetooth permissions are missing. Runtime permissions aren't part of the channel contract: Dart requests them with `permission_handler` before calling `initialize`.
 - `disconnectDevice` drops every link to the device and cancels a pending connect. On Android that's the client link, the server link, and a pending `connectGatt`. On iOS it's the client link only, because CoreBluetooth can't drop a central that's connected to our service. Dart calls it when a registered device is deleted (`BleAppController.removeDevice`), after the registered list has been saved, because the Android service reads that list to decide whether to reconnect.
+- Every `sendMessage` gets exactly one `messageSent` or `messageFailed` for its `messageId`. The id is generated in Dart, and the chat shows each message as 전송 중 until that event arrives. "Sent" means the peer's stack accepted it (write response, or notification handed off), not that the peer app displayed it. If Android can't even start the service action, the method call fails with `SERVICE_UNAVAILABLE`.
 - `pair` is true only for user-initiated connects (the 연결 button). Android then bonds unbonded devices first via `createBond()`, which shows the system pairing dialog. Without it, Android connects only to already-bonded devices, so replaying saved devices on launch never prompts. iOS ignores it.
 - `deviceId` is the MAC address on Android and the `CBPeripheral.identifier` UUID string on iOS. These IDs are not portable between platforms.
 
@@ -49,6 +51,7 @@ When you add a method or event, update `lib/main.dart` (`BleAppController._invok
 - Bonding is what keeps `deviceId` stable. Unbonded phones advertise with rotating random addresses. Once bonded, the stack resolves every later advertisement and incoming connection from that phone to the address it had at bonding time. So scan results, client links, and GATT server peers all report the same ID.
 - Two bonded phones with central mode on usually end up linked twice, because each auto-connects to the other's server. A peer only gets `disconnected` once neither link is left (`emitDisconnectedIfUnlinked`).
 - The service listens for `BluetoothAdapter.ACTION_STATE_CHANGED`. On power-off it resets its state, reports every link as `disconnected`, and the status becomes `bluetooth-off` (iOS reports the same string, and Dart shows a banner). On power-on it runs `restoreStateFromPrefs()`. Each advertising start uses a new `AdvertiseCallback`. The framework keeps the old one across a power cycle, and reusing it fails with `ALREADY_STARTED`. `advertiseCallback != null` marks a start in progress, so overlapping start requests don't create a second advertising set.
+- GATT operations run through `GattOperationQueue`, one queue per link and role (`clientQueues`, `serverQueues`). Android allows a single outstanding operation per connection, so the CCCD write, message writes, and notifications each wait for their callback (`onDescriptorWrite`, `onCharacteristicWrite`, `onNotificationSent`). When a link goes away, its queued operations fail. The queue has JVM unit tests (`android/app/src/test`, `./gradlew :app:testDebugUnitTest`).
 - `BluetoothBootReceiver` sends `ACTION_RESTORE` on boot.
 - `BleEventBus` is a process-wide singleton. It posts events to the Flutter `EventSink` on the main looper, and it drops events while no Flutter listener is attached.
 - Automatic reconnects (on restore and on scan results) only target **bonded** devices.

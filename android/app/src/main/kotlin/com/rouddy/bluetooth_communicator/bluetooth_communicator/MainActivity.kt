@@ -74,12 +74,20 @@ class MainActivity : FlutterActivity() {
                     "sendMessage" -> {
                         val deviceId = call.argument<String>("deviceId")
                         val message = call.argument<String>("message")
-                        startServiceAction(
+                        val started = startServiceAction(
                             BluetoothBackgroundService.ACTION_SEND_MESSAGE,
                             deviceId,
-                            message
+                            message,
+                            messageId = call.argument<String>("messageId")
                         )
-                        result.success(null)
+                        // The service reports the outcome with messageSent/messageFailed;
+                        // if it never got the request, fail the call so Dart marks the
+                        // message as failed instead of leaving it pending.
+                        if (started) {
+                            result.success(null)
+                        } else {
+                            result.error("SERVICE_UNAVAILABLE", "Bluetooth service unavailable", null)
+                        }
                     }
                     else -> result.notImplemented()
                 }
@@ -114,8 +122,9 @@ class MainActivity : FlutterActivity() {
         action: String,
         deviceId: String? = null,
         message: String? = null,
-        pair: Boolean = false
-    ) {
+        pair: Boolean = false,
+        messageId: String? = null
+    ): Boolean {
         if (!hasBlePermissions()) {
             BleEventBus.emit(
                 mapOf(
@@ -123,7 +132,7 @@ class MainActivity : FlutterActivity() {
                     "message" to "Cannot start service: Bluetooth permissions are missing."
                 )
             )
-            return
+            return false
         }
 
         val intent = Intent(this, BluetoothBackgroundService::class.java).apply {
@@ -137,9 +146,13 @@ class MainActivity : FlutterActivity() {
             if (pair) {
                 putExtra(BluetoothBackgroundService.EXTRA_PAIR, true)
             }
+            if (messageId != null) {
+                putExtra(BluetoothBackgroundService.EXTRA_MESSAGE_ID, messageId)
+            }
         }
-        try {
+        return try {
             startForegroundService(intent)
+            true
         } catch (e: Exception) {
             e.printStackTrace()
             BleEventBus.emit(
@@ -148,6 +161,7 @@ class MainActivity : FlutterActivity() {
                     "message" to "Failed to start service: ${e.message}"
                 )
             )
+            false
         }
     }
 }
