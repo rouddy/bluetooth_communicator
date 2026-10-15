@@ -1038,7 +1038,16 @@ class BluetoothBackgroundService : Service() {
         }
     }
 
+    @SuppressLint("MissingPermission")
     private fun onBluetoothOff() {
+        // "Bluetooth off" can leave LE running (adapter state BLE_ON on Samsung), with
+        // our advertising set and scan still alive. Stop them while the advertiser and
+        // scanner can still be reached; dropping the callback alone leaked the old
+        // advertising set, which then ran next to the new one after Bluetooth came
+        // back (two addresses for the same phone).
+        advertiseCallback?.let { callback -> runCatching { advertiser?.stopAdvertising(callback) } }
+        runCatching { scanner?.stopScan(scanCallback) }
+        handler.removeCallbacks(retryScan)
         advertiseCallback = null
         isAdvertising = false
         isScanning = false
