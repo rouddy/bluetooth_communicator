@@ -497,7 +497,13 @@ class BleAppController extends ChangeNotifier {
 
   Future<bool> checkPermissions() async {
     final statuses = await Future.wait(_blePermissions.map((p) => p.status));
+    // On Android, `status` reports a permanent denial as plain `denied` (only a
+    // request reveals it), so keep an earlier permanent denial until granted.
+    final wasPermanentlyDenied = permissionsPermanentlyDenied;
     _updatePermissionState(statuses);
+    permissionsPermanentlyDenied =
+        !permissionsGranted &&
+        (permissionsPermanentlyDenied || wasPermanentlyDenied);
     notifyListeners();
     return permissionsGranted;
   }
