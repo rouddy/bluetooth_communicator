@@ -455,10 +455,23 @@ extension IOSBleBackgroundManager: CBCentralManagerDelegate {
     didFailToConnect peripheral: CBPeripheral,
     error: Error?
   ) {
+    if reportBondLossIfNeeded(peripheral, error: error) {
+      return
+    }
     emit(type: "error", payload: [
       "message": "Connection to \(peripheral.identifier.uuidString) failed: \(error?.localizedDescription ?? "unknown error")"
     ])
     emitDisconnectedIfUnlinked(peripheral.identifier)
+  }
+
+  /// The peer removed its pairing with us: reconnecting can't work until the user
+  /// pairs again, so stop reconnecting it and tell Dart (same event as Android).
+  private func reportBondLossIfNeeded(_ peripheral: CBPeripheral, error: Error?) -> Bool {
+    guard (error as? CBError)?.code == .peerRemovedPairingInformation else { return false }
+    forgottenPeripherals.insert(peripheral.identifier)
+    emit(type: "bondLost", payload: ["deviceId": peripheral.identifier.uuidString])
+    emitDisconnectedIfUnlinked(peripheral.identifier)
+    return true
   }
 
   func centralManager(
@@ -494,6 +507,9 @@ extension IOSBleBackgroundManager: CBCentralManagerDelegate {
     writableCharacteristics.removeValue(forKey: peripheral.identifier)
     connectedPeripheralIds.remove(peripheral.identifier)
     failPendingWrites(peripheral.identifier, error: "Disconnected")
+    if reportBondLossIfNeeded(peripheral, error: error) {
+      return
+    }
     emitDisconnectedIfUnlinked(peripheral.identifier)
     if centralEnabled && !forgottenPeripherals.contains(peripheral.identifier) {
       central.connect(peripheral, options: nil)

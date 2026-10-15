@@ -16,6 +16,7 @@ const String _prefsCentralEnabled = 'prefs_central_enabled';
 const String _prefsRegisteredDevices = 'prefs_registered_devices';
 const String _prefsMessages = 'prefs_messages';
 const String _prefsUnreadCounts = 'prefs_unread_counts';
+const String _prefsPairingLost = 'prefs_pairing_lost';
 
 /// Longest message, in UTF-8 bytes, that can be sent: a GATT attribute value holds
 /// at most 512 bytes. Notifications are further limited by the link's MTU (514
@@ -505,7 +506,7 @@ class _DeviceControlPageState extends State<DeviceControlPage>
                   child: CircularProgressIndicator(strokeWidth: 2),
                 ),
               ),
-              LinkState.disconnected => FilledButton.tonal(
+              LinkState.disconnected || LinkState.pairingLost => FilledButton.tonal(
                 onPressed: () {
                   widget.controller.connectDevice(
                     widget.device.identifier,
@@ -826,6 +827,9 @@ class BleAppController extends ChangeNotifier {
     if (_connectingDeviceIds.contains(deviceId)) {
       return LinkState.connecting;
     }
+    if (_pairingLostDeviceIds.contains(deviceId)) {
+      return LinkState.pairingLost;
+    }
     return LinkState.disconnected;
   }
 
@@ -834,7 +838,17 @@ class BleAppController extends ChangeNotifier {
     LinkState.bonding => '페어링 중…',
     LinkState.connecting => '연결 중…',
     LinkState.disconnected => '연결 안 됨',
+    LinkState.pairingLost => '페어링 해제됨',
   };
+
+  /// Devices whose pairing was removed (on either phone). Their address belonged to
+  /// that pairing, so they won't reconnect; they have to be paired again from the
+  /// nearby list. Cleared when the device connects again.
+  final Set<String> _pairingLostDeviceIds = <String>{};
+
+  Future<void> _savePairingLost() async {
+    await _prefs?.setStringList(_prefsPairingLost, _pairingLostDeviceIds.toList());
+  }
 
   void _settleLink(String deviceId) {
     _connectingDeviceIds.remove(deviceId);
@@ -873,6 +887,9 @@ class BleAppController extends ChangeNotifier {
   Future<void> removeDevice(String deviceId) async {
     registeredDevices.removeWhere((d) => d.identifier == deviceId);
     connectedDeviceIds.remove(deviceId);
+    if (_pairingLostDeviceIds.remove(deviceId)) {
+      unawaited(_savePairingLost());
+    }
     messagesByDevice.remove(deviceId);
     unreadCountByDevice.remove(deviceId);
     _messagesChanged();
@@ -1032,6 +1049,9 @@ class BleAppController extends ChangeNotifier {
         final id = event['deviceId'] as String?;
         if (id != null) {
           _settleLink(id);
+          if (_pairingLostDeviceIds.remove(id)) {
+            unawaited(_savePairingLost());
+          }
           connectedDeviceIds.add(id);
           _upsertRegisteredDevice(_deviceById(id));
           unawaited(_saveRegisteredDevices());
@@ -1042,6 +1062,19 @@ class BleAppController extends ChangeNotifier {
         if (id != null) {
           _settleLink(id);
           connectedDeviceIds.remove(id);
+        }
+        break;
+      case 'bondLost':
+        if (event['deviceId'] case final String id) {
+          _settleLink(id);
+          connectedDeviceIds.remove(id);
+          _pairingLostDeviceIds.add(id);
+          unawaited(_savePairingLost());
+          final name = _deviceById(id).name;
+          _reportError(
+            '${name.isEmpty ? id : name}와(과)의 페어링이 해제되었습니다. '
+            '주변 기기 목록에서 다시 연결해 주세요.',
+          );
         }
         break;
       case 'bonding':
@@ -1115,6 +1148,7 @@ class BleAppController extends ChangeNotifier {
     if (!_messagesLoaded) {
       _messagesLoaded = true;
       _loadMessages(prefs);
+      _pairingLostDeviceIds.addAll(prefs.getStringList(_prefsPairingLost) ?? const []);
     }
   }
 
@@ -1246,7 +1280,7 @@ class BleStatus {
   }
 }
 
-enum LinkState { disconnected, connecting, bonding, connected }
+enum LinkState { disconnected, connecting, bonding, connected, pairingLost }
 
 enum MessageStatus {
   /// Handed to native code, waiting for its messageSent/messageFailed event.

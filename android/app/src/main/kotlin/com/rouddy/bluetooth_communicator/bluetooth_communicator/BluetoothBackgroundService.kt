@@ -1058,6 +1058,23 @@ class BluetoothBackgroundService : Service() {
             } ?: return
             val address = device.address ?: return
             val state = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.ERROR)
+            val previous =
+                intent.getIntExtra(BluetoothDevice.EXTRA_PREVIOUS_BOND_STATE, BluetoothDevice.ERROR)
+            if (
+                state == BluetoothDevice.BOND_NONE &&
+                previous == BluetoothDevice.BOND_BONDED &&
+                !pendingBondAddresses.contains(address)
+            ) {
+                // The pairing went away: removed in this phone's settings, or removed on
+                // the peer, which the stack detects as "bond loss" (key missing) on the
+                // next encryption and then drops here too. The address belongs to that
+                // bond, so a pending background connect to it can never succeed.
+                pendingConnections.remove(address)?.let { runCatching { it.close() } }
+                BleEventBus.emit(mapOf("type" to "bondLost", "deviceId" to address))
+                emitDisconnectedIfUnlinked(address)
+                emitStatus()
+                return
+            }
             if (!pendingBondAddresses.contains(address)) {
                 return
             }
