@@ -357,13 +357,25 @@ class DeviceControlPage extends StatefulWidget {
   State<DeviceControlPage> createState() => _DeviceControlPageState();
 }
 
-class _DeviceControlPageState extends State<DeviceControlPage> {
+class _DeviceControlPageState extends State<DeviceControlPage>
+    with WidgetsBindingObserver {
   final TextEditingController _textController = TextEditingController();
 
   @override
   void initState() {
     super.initState();
     widget.controller.addListener(_onControllerUpdate);
+    widget.controller.openChat(widget.device.identifier);
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Messages that arrived while the app was in the background were counted as
+    // unread; the user is looking at them now.
+    if (state == AppLifecycleState.resumed) {
+      widget.controller.clearUnreadForDevice(widget.device.identifier);
+    }
   }
 
   void _onControllerUpdate() {
@@ -375,6 +387,8 @@ class _DeviceControlPageState extends State<DeviceControlPage> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    widget.controller.closeChat(widget.device.identifier);
     widget.controller.removeListener(_onControllerUpdate);
     _textController.dispose();
     super.dispose();
@@ -793,6 +807,25 @@ class BleAppController extends ChangeNotifier {
     }
   }
 
+  String? _openChatDeviceId;
+
+  /// Called by the chat page while it's open. Its messages don't count as unread
+  /// while the app is in the foreground. Doesn't notify listeners (it's called
+  /// from initState); opening a chat from the list clears the unread count.
+  void openChat(String deviceId) => _openChatDeviceId = deviceId;
+
+  void closeChat(String deviceId) {
+    if (_openChatDeviceId == deviceId) {
+      _openChatDeviceId = null;
+    }
+  }
+
+  bool _isBeingRead(String deviceId) {
+    final state = WidgetsBinding.instance.lifecycleState;
+    return deviceId == _openChatDeviceId &&
+        (state == null || state == AppLifecycleState.resumed);
+  }
+
   void clearUnreadForDevice(String deviceId) {
     if ((unreadCountByDevice[deviceId] ?? 0) == 0) {
       return;
@@ -898,7 +931,9 @@ class BleAppController extends ChangeNotifier {
               outgoing: false,
             ),
           );
-          unreadCountByDevice[id] = (unreadCountByDevice[id] ?? 0) + 1;
+          if (!_isBeingRead(id)) {
+            unreadCountByDevice[id] = (unreadCountByDevice[id] ?? 0) + 1;
+          }
           _messagesChanged();
         }
         break;
