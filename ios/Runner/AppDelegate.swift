@@ -83,6 +83,7 @@ final class IOSBleBackgroundManager: NSObject, FlutterStreamHandler {
   private let serviceUUID = CBUUID(string: "1F9ED31D-B738-4D4C-A6D8-86DBF0F9C001")
   private let messageCharacteristicUUID = CBUUID(string: "DB912050-2E4E-4C4E-A543-E89121E57595")
   private let prefs = UserDefaults.standard
+  private let pendingMessagesKey = "pending_messages"
 
   private lazy var centralManager: CBCentralManager = {
     CBCentralManager(
@@ -130,6 +131,11 @@ final class IOSBleBackgroundManager: NSObject, FlutterStreamHandler {
   func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
     eventSink = events
     emit(type: "status", payload: ["status": "ios-ready"])
+    // Messages that arrived before Dart listened (e.g. the system relaunched the app in
+    // the background for a BLE event through state restoration).
+    let pending = prefs.array(forKey: pendingMessagesKey) as? [[String: Any]] ?? []
+    prefs.removeObject(forKey: pendingMessagesKey)
+    pending.forEach { events($0) }
     return nil
   }
 
@@ -355,8 +361,18 @@ final class IOSBleBackgroundManager: NSObject, FlutterStreamHandler {
   private func emit(type: String, payload: [String: Any]) {
     var event: [String: Any] = ["type": type]
     payload.forEach { event[$0.key] = $0.value }
-    eventSink?(event)
+    if let eventSink {
+      eventSink(event)
+    } else if type == "message" {
+      // Other events describe state that's replayed on the next initialize; a message
+      // is lost unless it's kept until Dart listens.
+      var pending = prefs.array(forKey: pendingMessagesKey) as? [[String: Any]] ?? []
+      pending.append(event)
+      prefs.set(Array(pending.suffix(500)), forKey: pendingMessagesKey)
+    }
   }
+
+  private var nowMillis: Int { Int(Date().timeIntervalSince1970 * 1000) }
 }
 
 extension IOSBleBackgroundManager: CBCentralManagerDelegate {
@@ -548,7 +564,9 @@ extension IOSBleBackgroundManager: CBPeripheralManagerDelegate {
     peripheral.respond(to: first, withResult: .success)
     for (centralId, data) in messages {
       guard let message = String(data: data, encoding: .utf8) else { continue }
-      emit(type: "message", payload: ["deviceId": centralId.uuidString, "message": message])
+      emit(type: "message", payload: [
+        "deviceId": centralId.uuidString, "message": message, "receivedAt": nowMillis
+      ])
     }
   }
 
@@ -649,7 +667,8 @@ extension IOSBleBackgroundManager: CBPeripheralDelegate {
     else { return }
     emit(type: "message", payload: [
       "deviceId": peripheral.identifier.uuidString,
-      "message": message
+      "message": message,
+      "receivedAt": nowMillis
     ])
   }
 }
