@@ -127,7 +127,9 @@
 - 스캔 시작이 실패하거나(예: 30초 안에 5번 넘게 시작) 시스템이 스캔을 중단해도 `isScanning`이 true로 남습니다.
 - 그러면 `scanNow`와 `startScan`이 영원히 아무 일도 하지 않습니다.
 
-### 13. 스캔 비용(배터리, 성능) `코드`
+### 13. 스캔 비용(배터리, 성능) `확인됨` ✅ 해결
+- 확인: Fold5에서 주변 기기 1대(Jump3)만 있어도 20초 동안 controller 알림이 102번 발생했습니다. 알림마다 `MaterialApp` 전체가 다시 빌드됐습니다.
+- 해결: 네이티브에서 `discovered` 이벤트 중복을 걸러, 기기가 새로 보이거나 이름이 바뀔 때만 보냅니다(102 → 0, 목록은 그대로 유지). 등록 기기 목록은 캐시하고 prefs가 바뀔 때만 다시 읽습니다. 백그라운드에서는 `LOW_POWER`로 스캔하고(dumpsys로 확인), 리빌드 범위는 `MaterialApp`이 아니라 각 화면으로 줄였습니다. 테스트: `integration_test/scan_cost_test.dart`, `test/page_updates_test.dart`.
 - central이 켜져 있는 동안 `SCAN_MODE_LOW_LATENCY` + `ALL_MATCHES` 스캔이 멈추지 않습니다. 배터리를 많이 쓰고, Android는 30분이 지나면 스캔 등급을 낮춥니다.
 - 광고가 들어올 때마다 `discovered` 이벤트를 보냅니다.
   - Dart는 그때마다 `notifyListeners()`를 호출합니다. `AnimatedBuilder`가 `MaterialApp` 전체를 감싸고 있어서 앱 전체가 다시 빌드됩니다.

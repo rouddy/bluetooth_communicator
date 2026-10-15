@@ -34,17 +34,14 @@ class MyApp extends StatelessWidget {
 
   final BleAppController controller;
 
+  // MaterialApp isn't rebuilt on controller changes (which used to rebuild the whole
+  // app, including every route); each page listens to the controller itself.
   @override
   Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: controller,
-      builder: (context, _) {
-        return MaterialApp(
-          title: 'Bluetooth Communicator',
-          theme: ThemeData(colorSchemeSeed: Colors.blue, useMaterial3: true),
-          home: HomePage(controller: controller),
-        );
-      },
+    return MaterialApp(
+      title: 'Bluetooth Communicator',
+      theme: ThemeData(colorSchemeSeed: Colors.blue, useMaterial3: true),
+      home: HomePage(controller: controller),
     );
   }
 }
@@ -56,6 +53,13 @@ class HomePage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: controller,
+      builder: (context, _) => _buildPage(context),
+    );
+  }
+
+  Widget _buildPage(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
         title: const Text('기기 목록'),
@@ -198,6 +202,13 @@ class SettingsPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: controller,
+      builder: (context, _) => _buildPage(context),
+    );
+  }
+
+  Widget _buildPage(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('설정')),
       body: ListView(
@@ -270,6 +281,13 @@ class NotificationPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: controller,
+      builder: (context, _) => _buildPage(context),
+    );
+  }
+
+  Widget _buildPage(BuildContext context) {
     final unreadDevices = controller.devicesWithUnreadMessages;
     final history = controller.messageHistory;
     return Scaffold(
