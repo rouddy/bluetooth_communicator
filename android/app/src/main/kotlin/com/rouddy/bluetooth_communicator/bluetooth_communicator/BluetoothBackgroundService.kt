@@ -35,8 +35,11 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.ParcelUuid
+import android.os.SystemClock
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
@@ -87,6 +90,13 @@ class BluetoothBackgroundService : Service() {
 
     @Volatile
     private var isScanning = false
+
+    private val handler = Handler(Looper.getMainLooper())
+    private val scanStartLimiter = ScanStartLimiter()
+    private val retryScan = Runnable {
+        startScan()
+        emitStatus()
+    }
 
     @Volatile
     private var advertiseDeviceName = true
@@ -348,6 +358,13 @@ class BluetoothBackgroundService : Service() {
             return
         }
         val bleScanner = scanner ?: return
+        // Defer instead of tripping Android's scan-start limit (see ScanStartLimiter).
+        val delay = scanStartLimiter.delayBeforeStart(SystemClock.elapsedRealtime())
+        if (delay > 0) {
+            handler.removeCallbacks(retryScan)
+            handler.postDelayed(retryScan, delay)
+            return
+        }
         val filters = listOf(
             ScanFilter.Builder()
                 .setServiceUuid(SERVICE_PARCEL_UUID)
@@ -362,6 +379,7 @@ class BluetoothBackgroundService : Service() {
 
     @SuppressLint("MissingPermission")
     private fun stopScan() {
+        handler.removeCallbacks(retryScan)
         scanner?.stopScan(scanCallback)
         isScanning = false
     }
@@ -755,6 +773,24 @@ class BluetoothBackgroundService : Service() {
     }
 
     private val scanCallback = object : ScanCallback() {
+        override fun onScanFailed(errorCode: Int) {
+            if (errorCode == SCAN_FAILED_ALREADY_STARTED) {
+                // This callback is still registered and scanning.
+                return
+            }
+            // Without this, isScanning stayed true and every later startScan/scanNow
+            // returned early: the app showed "scanning" while nothing was scanning.
+            isScanning = false
+            emitError("Scan failed (error $errorCode)")
+            emitStatus()
+            // Most failures are transient; the "too frequently" limit (error 6) is
+            // measured over 30 s, so retry after that.
+            handler.removeCallbacks(retryScan)
+            if (isCentralEnabled) {
+                handler.postDelayed(retryScan, SCAN_RETRY_DELAY_MS)
+            }
+        }
+
         @SuppressLint("MissingPermission")
         override fun onScanResult(callbackType: Int, result: ScanResult?) {
             val device = result?.device ?: return
@@ -1133,6 +1169,7 @@ class BluetoothBackgroundService : Service() {
         private const val MAX_ATT_MTU = 517
         private const val ATT_HEADER_SIZE = 3
         private const val MAX_ATTRIBUTE_LENGTH = 512
+        private const val SCAN_RETRY_DELAY_MS = 30_000L
         private val CLIENT_CONFIG_DESCRIPTOR_UUID =
             UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
     }

@@ -121,7 +121,9 @@
 
 ## P2: 안정성, UX, 배터리
 
-### 12. `onScanFailed`를 구현하지 않음 `코드`
+### 12. `onScanFailed`를 구현하지 않음 `확인됨` ✅ 해결
+- 확인: Fold5에서 scan 스위치를 빠르게 13번 토글하자, Android가 등록을 거부했습니다(`registration failed because app is scanning too frequently`). 그런데 이 경로에서는 **`onScanFailed`도 호출되지 않아서**, 앱은 40초가 지나도 스캐너 없이 `scanning`으로 표시했습니다.
+- 해결: `ScanStartLimiter`가 Android의 제한(30초에 시작 5회)을 직접 세어, 넘는 시작 요청은 허용되는 시점으로 미룹니다. 그 밖의 실패를 위해 `onScanFailed`도 구현했습니다. 실패하면 `isScanning`을 내리고 오류를 보고한 뒤, central이 켜져 있으면 30초 후 다시 시도합니다. 수정 후에는 연속 토글 직후 잠시 `idle`이었다가 30초 안에 실제 스캐너가 동작하며 `scanning`으로 돌아왔고, 빈도 제한 오류도 나오지 않았습니다. 테스트: `ScanStartLimiterTest`(JVM).
 - 스캔 시작이 실패하거나(예: 30초 안에 5번 넘게 시작) 시스템이 스캔을 중단해도 `isScanning`이 true로 남습니다.
 - 그러면 `scanNow`와 `startScan`이 영원히 아무 일도 하지 않습니다.
 
