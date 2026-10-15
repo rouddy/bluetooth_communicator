@@ -472,7 +472,10 @@ class BluetoothBackgroundService : Service() {
         if (!device.createBond()) {
             pendingBondAddresses.remove(address)
             emitError("Pairing with $address could not be started")
+            emitDisconnectedIfUnlinked(address)
+            return
         }
+        BleEventBus.emit(mapOf("type" to "bonding", "deviceId" to address))
     }
 
     @SuppressLint("MissingPermission")
@@ -1061,6 +1064,8 @@ class BluetoothBackgroundService : Service() {
                 BluetoothDevice.BOND_NONE -> {
                     pendingBondAddresses.remove(address)
                     emitError("Pairing with $address failed")
+                    // Ends the 연결 중/페어링 중 state in Dart.
+                    emitDisconnectedIfUnlinked(address)
                 }
             }
         }

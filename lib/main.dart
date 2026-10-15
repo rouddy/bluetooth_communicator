@@ -176,7 +176,7 @@ class DeviceListPage extends StatelessWidget {
       ),
       title: Text(device.name.isEmpty ? '(Unknown)' : device.name),
       subtitle: Text(
-        '${isConnected ? "연결됨" : "연결 안 됨"} · ${device.identifier}',
+        '${controller.linkLabel(device.identifier)} · ${device.identifier}',
       ),
       trailing: unreadCount > 0
           ? Badge(
@@ -484,19 +484,32 @@ class _DeviceControlPageState extends State<DeviceControlPage>
             leading: Icon(
               isConnected ? Icons.bluetooth_connected : Icons.bluetooth_disabled,
             ),
-            title: Text(isConnected ? '연결됨' : '연결 안 됨'),
+            title: Text(widget.controller.linkLabel(widget.device.identifier)),
             subtitle: Text(widget.device.identifier),
-            trailing: FilledButton.tonal(
-              onPressed: isConnected
-                  ? null
-                  : () {
-                      widget.controller.connectDevice(
-                        widget.device.identifier,
-                        pair: true,
-                      );
-                    },
-              child: Text(isConnected ? '연결됨' : '연결'),
-            ),
+            trailing: switch (widget.controller.linkStateFor(
+              widget.device.identifier,
+            )) {
+              LinkState.connected => const FilledButton.tonal(
+                onPressed: null,
+                child: Text('연결됨'),
+              ),
+              LinkState.connecting || LinkState.bonding => const FilledButton.tonal(
+                onPressed: null,
+                child: SizedBox.square(
+                  dimension: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+              ),
+              LinkState.disconnected => FilledButton.tonal(
+                onPressed: () {
+                  widget.controller.connectDevice(
+                    widget.device.identifier,
+                    pair: true,
+                  );
+                },
+                child: const Text('연결'),
+              ),
+            },
           ),
           const Divider(height: 1),
           Expanded(
@@ -774,9 +787,55 @@ class BleAppController extends ChangeNotifier {
     await _invoke('scanNow');
   }
 
+  final Set<String> _connectingDeviceIds = <String>{};
+  final Set<String> _bondingDeviceIds = <String>{};
+  final Map<String, Timer> _connectTimeouts = <String, Timer>{};
+
+  /// A user-initiated connect is shown as connecting for at most this long: a
+  /// background connect to an out-of-range device never finishes on its own.
+  static const connectingTimeout = Duration(seconds: 30);
+
+  LinkState linkStateFor(String deviceId) {
+    if (connectedDeviceIds.contains(deviceId)) {
+      return LinkState.connected;
+    }
+    if (_bondingDeviceIds.contains(deviceId)) {
+      return LinkState.bonding;
+    }
+    if (_connectingDeviceIds.contains(deviceId)) {
+      return LinkState.connecting;
+    }
+    return LinkState.disconnected;
+  }
+
+  String linkLabel(String deviceId) => switch (linkStateFor(deviceId)) {
+    LinkState.connected => '연결됨',
+    LinkState.bonding => '페어링 중…',
+    LinkState.connecting => '연결 중…',
+    LinkState.disconnected => '연결 안 됨',
+  };
+
+  void _settleLink(String deviceId) {
+    _connectingDeviceIds.remove(deviceId);
+    _bondingDeviceIds.remove(deviceId);
+    _connectTimeouts.remove(deviceId)?.cancel();
+  }
+
   /// [pair] allows the native side to start bonding (system pairing dialog) when
-  /// the device isn't bonded yet. Only pass it for user-initiated connects.
+  /// the device isn't bonded yet. Only pass it for user-initiated connects; those
+  /// are also shown as connecting until the link is up, fails, or times out.
   Future<void> connectDevice(String deviceId, {bool pair = false}) async {
+    if (pair && !connectedDeviceIds.contains(deviceId)) {
+      _connectingDeviceIds.add(deviceId);
+      _connectTimeouts.remove(deviceId)?.cancel();
+      _connectTimeouts[deviceId] = Timer(connectingTimeout, () {
+        _connectTimeouts.remove(deviceId);
+        if (_connectingDeviceIds.remove(deviceId)) {
+          notifyListeners();
+        }
+      });
+      notifyListeners();
+    }
     await _invoke('connectDevice', {'deviceId': deviceId, 'pair': pair});
   }
 
@@ -951,6 +1010,7 @@ class BleAppController extends ChangeNotifier {
       case 'connected':
         final id = event['deviceId'] as String?;
         if (id != null) {
+          _settleLink(id);
           connectedDeviceIds.add(id);
           _upsertRegisteredDevice(_deviceById(id));
           unawaited(_saveRegisteredDevices());
@@ -959,7 +1019,14 @@ class BleAppController extends ChangeNotifier {
       case 'disconnected':
         final id = event['deviceId'] as String?;
         if (id != null) {
+          _settleLink(id);
           connectedDeviceIds.remove(id);
+        }
+        break;
+      case 'bonding':
+        // Android only: the system pairing dialog is up for this device.
+        if (event['deviceId'] case final String id) {
+          _bondingDeviceIds.add(id);
         }
         break;
       case 'message':
@@ -1095,6 +1162,9 @@ class BleAppController extends ChangeNotifier {
   void dispose() {
     _eventsSubscription?.cancel();
     _errors.close();
+    for (final timer in _connectTimeouts.values) {
+      timer.cancel();
+    }
     super.dispose();
   }
 }
@@ -1117,6 +1187,8 @@ class BleDevice {
         'name': name,
       };
 }
+
+enum LinkState { disconnected, connecting, bonding, connected }
 
 enum MessageStatus {
   /// Handed to native code, waiting for its messageSent/messageFailed event.
