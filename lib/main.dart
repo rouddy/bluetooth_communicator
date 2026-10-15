@@ -15,11 +15,13 @@ const String _prefsAdvertisingEnabled = 'prefs_advertising_enabled';
 const String _prefsCentralEnabled = 'prefs_central_enabled';
 const String _prefsRegisteredDevices = 'prefs_registered_devices';
 
-void main() async {
+void main() {
   WidgetsFlutterBinding.ensureInitialized();
   final controller = BleAppController();
-  await controller.initialize();
+  // Render first: initialize() waits on the permission dialog and native code,
+  // and neither should keep the app on the splash screen.
   runApp(MyApp(controller: controller));
+  unawaited(controller.initialize());
 }
 
 class MyApp extends StatelessWidget {
@@ -52,6 +54,12 @@ class HomePage extends StatelessWidget {
     return Scaffold(
       appBar: AppBar(
         title: const Text('기기 목록'),
+        bottom: controller.initializing
+            ? const PreferredSize(
+                preferredSize: Size.fromHeight(4),
+                child: LinearProgressIndicator(),
+              )
+            : null,
         actions: [
           IconButton(
             tooltip: 'Notifications',
@@ -431,6 +439,7 @@ class BleAppController extends ChangeNotifier {
   bool centralEnabled = false;
   String backgroundStatus = 'idle';
   String? lastError;
+  bool initializing = false;
   bool permissionsGranted = false;
   bool permissionsPermanentlyDenied = false;
 
@@ -530,9 +539,29 @@ class BleAppController extends ChangeNotifier {
     );
   }
 
+  /// Loads saved state, requests permissions, and replays the saved modes to
+  /// native code. Runs after the first frame, so failures are reported through
+  /// [lastError] instead of thrown.
   Future<void> initialize() async {
+    if (initializing) {
+      return;
+    }
+    initializing = true;
+    notifyListeners();
+    try {
+      await _initialize();
+    } catch (error) {
+      lastError = '초기화 실패: $error';
+    } finally {
+      initializing = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> _initialize() async {
     _prefs = await SharedPreferences.getInstance();
     _loadFromPrefs();
+    await _eventsSubscription?.cancel();
     _eventsSubscription = _eventChannel.receiveBroadcastStream().listen(
       _handleEvent,
       onError: (Object error) {

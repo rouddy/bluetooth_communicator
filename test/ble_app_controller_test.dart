@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:bluetooth_communicator/main.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -121,6 +123,29 @@ void main() {
       expect(nativeCalls, isEmpty);
       expect(controller.permissionsGranted, isFalse);
       expect(controller.lastError, contains('권한'));
+    });
+  });
+
+  group('initialize re-entrancy', () {
+    test('a second call while the first is still running is ignored', () async {
+      registerNativeHandler();
+      permissions
+        ..checkResult = PermissionStatus.denied
+        ..requestResult = PermissionStatus.granted
+        ..requestGate = Completer<void>();
+      final controller = BleAppController();
+
+      final first = controller.initialize();
+      // Let the first call reach the pending permission request.
+      await pumpEventQueue();
+      expect(controller.initializing, isTrue);
+      await controller.initialize();
+      permissions.requestGate!.complete();
+      await first;
+
+      // Two concurrent requests make permission_handler throw on device.
+      expect(permissions.requestCount, 1);
+      expect(controller.initializing, isFalse);
     });
   });
 

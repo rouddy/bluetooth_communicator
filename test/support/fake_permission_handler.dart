@@ -8,7 +8,8 @@ import 'package:plugin_platform_interface/plugin_platform_interface.dart';
 /// [checkResult] is what `Permission.status` reports, and [requestResult] is
 /// what `request()` returns for every permission. To hold a request open (e.g.
 /// to observe the UI while the system dialog would be showing), set
-/// [requestGate] and complete it later.
+/// [requestGate] and complete it later. Set [requestError] to make requests
+/// throw.
 class FakePermissionHandler extends PermissionHandlerPlatform
     with MockPlatformInterfaceMixin {
   FakePermissionHandler({
@@ -19,6 +20,7 @@ class FakePermissionHandler extends PermissionHandlerPlatform
   PermissionStatus checkResult;
   PermissionStatus requestResult;
   Completer<void>? requestGate;
+  Object? requestError;
   int requestCount = 0;
   int openSettingsCount = 0;
 
@@ -33,6 +35,9 @@ class FakePermissionHandler extends PermissionHandlerPlatform
   ) async {
     requestCount++;
     await requestGate?.future;
+    if (requestError case final error?) {
+      throw error;
+    }
     return {for (final permission in permissions) permission: requestResult};
   }
 

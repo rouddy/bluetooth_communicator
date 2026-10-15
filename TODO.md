@@ -29,7 +29,8 @@
 - 수정 방향: `didInitializeImplicitFlutterEngine(_:)`에서 `engineBridge.applicationRegistrar.messenger()`로 채널을 등록합니다.
 - 실제 iOS 기기에서 먼저 확인해야 합니다.
 
-### 3. `main()`이 `initialize()`를 끝까지 기다린 뒤에 `runApp()`을 호출함 `확인됨`
+### 3. `main()`이 `initialize()`를 끝까지 기다린 뒤에 `runApp()`을 호출함 `확인됨` ✅ 해결
+- 해결: `runApp()`을 먼저 호출하고 `initialize()`는 그 뒤에 비동기로 실행합니다. 초기화 중에는 AppBar 아래에 진행 표시줄을 보여주고, 예외는 `lastError`로 보고합니다. 초기화가 겹치는 호출은 무시합니다. 테스트: `test/app_startup_test.dart`. S23에서 권한 팝업 뒤에 스플래시가 아닌 홈 화면이 그려지는 것을 확인했습니다.
 - 첫 실행에는 권한 팝업이 스플래시 위에 뜹니다.
 - `initialize()`에서 예외가 나면 화면이 영원히 뜨지 않습니다(1번이 그 경우).
 - 수정 방향: `runApp()`을 먼저 호출하고, 초기화는 그 뒤에 비동기로 진행합니다. 초기화 중 상태와 실패 상태를 UI에 표시합니다.
@@ -138,7 +139,8 @@
 - Dart 입력창에는 길이 제한이 없어서 긴 메시지는 실패하거나 오류만 납니다.
 - 수정 방향: 입력 단계에서 UTF-8 바이트 수를 제한하거나, 프로토콜 차원에서 분할 전송합니다(23번 참고).
 
-### 18. 광고 시작이 겹칠 수 있음 `추정`
+### 18. 광고 시작이 겹칠 수 있음 `확인됨`
+- S23에서 권한을 허용한 직후 설정 화면에 `Advertising failed: 3`(`ALREADY_STARTED`)이 표시되는 것을 확인했습니다.
 - Dart `initialize()`는 `ACTION_RESTORE`(광고 시작)와 `ACTION_START_ADVERTISING`을 연달아 보냅니다.
 - `isAdvertising`은 `onStartSuccess`가 와야 true가 되므로, 두 번째 시작이 `ADVERTISE_FAILED_ALREADY_STARTED`로 실패할 수 있습니다.
 - 그러면 실제로는 광고 중인데 `isAdvertising=false`가 되고, 오류 이벤트도 나갑니다.
