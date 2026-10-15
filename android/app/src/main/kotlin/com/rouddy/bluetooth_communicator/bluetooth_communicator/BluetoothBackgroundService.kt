@@ -5,6 +5,7 @@ import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.BroadcastReceiver
 import android.content.IntentFilter
@@ -37,6 +38,7 @@ import android.os.Build
 import android.os.IBinder
 import android.os.ParcelUuid
 import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import org.json.JSONArray
 import java.io.ByteArrayOutputStream
@@ -573,14 +575,16 @@ class BluetoothBackgroundService : Service() {
     }
 
     private fun emitMessage(deviceId: String, payload: ByteArray) {
+        val message = payload.toString(Charsets.UTF_8)
         BleEventBus.emit(
             mapOf(
                 "type" to "message",
                 "deviceId" to deviceId,
-                "message" to payload.toString(Charsets.UTF_8),
+                "message" to message,
                 "receivedAt" to System.currentTimeMillis()
             )
         )
+        notifyIncomingMessage(deviceId, message)
     }
 
     // Two bonded phones that both run central mode end up linked twice (each is the
@@ -664,6 +668,42 @@ class BluetoothBackgroundService : Service() {
         )
         val manager = getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(channel)
+        manager.createNotificationChannel(
+            NotificationChannel(
+                MESSAGE_CHANNEL_ID,
+                "Bluetooth 메시지",
+                NotificationManager.IMPORTANCE_DEFAULT
+            )
+        )
+    }
+
+    /**
+     * Posts a notification for a message received while the app isn't in the
+     * foreground; otherwise it would only show up once the user happens to open the app.
+     * One notification per device (tagged with its address), opening the app on tap.
+     */
+    @SuppressLint("MissingPermission")
+    private fun notifyIncomingMessage(deviceId: String, message: String) {
+        val manager = NotificationManagerCompat.from(this)
+        if (BleEventBus.appInForeground || !manager.areNotificationsEnabled()) {
+            return
+        }
+        // Bonded peers have a name; fall back to the address.
+        val title = runCatching { adapter?.getRemoteDevice(deviceId)?.name }.getOrNull() ?: deviceId
+        val openApp = PendingIntent.getActivity(
+            this,
+            0,
+            Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+        val notification = NotificationCompat.Builder(this, MESSAGE_CHANNEL_ID)
+            .setContentTitle(title)
+            .setContentText(message)
+            .setSmallIcon(android.R.drawable.stat_notify_chat)
+            .setContentIntent(openApp)
+            .setAutoCancel(true)
+            .build()
+        manager.notify(deviceId, MESSAGE_NOTIFICATION_ID, notification)
     }
 
     private fun hasBlePermissions(): Boolean {
@@ -1083,6 +1123,8 @@ class BluetoothBackgroundService : Service() {
             "flutter.prefs_registered_devices"
         private const val NOTIFICATION_CHANNEL_ID = "ble_background"
         private const val NOTIFICATION_ID = 2001
+        const val MESSAGE_CHANNEL_ID = "ble_messages"
+        const val MESSAGE_NOTIFICATION_ID = 3001
         private val SERVICE_UUID = UUID.fromString("1f9ed31d-b738-4d4c-a6d8-86dbf0f9c001")
         private val SERVICE_PARCEL_UUID = ParcelUuid(SERVICE_UUID)
         private val MESSAGE_CHARACTERISTIC_UUID =

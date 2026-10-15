@@ -1,6 +1,7 @@
 package com.rouddy.bluetooth_communicator.bluetooth_communicator
 
 import android.Manifest
+import android.app.NotificationManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import androidx.core.content.ContextCompat
@@ -104,6 +105,21 @@ class MainActivity : FlutterActivity() {
                     BleEventBus.detach()
                 }
             })
+    }
+
+    override fun onResume() {
+        super.onResume()
+        BleEventBus.appInForeground = true
+        // The messages are on screen now; clear their notifications.
+        val manager = getSystemService(NotificationManager::class.java)
+        manager.activeNotifications
+            .filter { it.notification.channelId == BluetoothBackgroundService.MESSAGE_CHANNEL_ID }
+            .forEach { manager.cancel(it.tag, it.id) }
+    }
+
+    override fun onPause() {
+        BleEventBus.appInForeground = false
+        super.onPause()
     }
 
     // When the activity is destroyed its engine goes with it, but the event channel's
