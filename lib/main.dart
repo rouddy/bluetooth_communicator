@@ -621,9 +621,13 @@ class BleAppController extends ChangeNotifier {
       return true;
     } on PlatformException catch (error) {
       lastError = '${error.code}: ${error.message}';
-      notifyListeners();
-      return false;
+    } on MissingPluginException {
+      // The native side didn't register the channel or doesn't implement this
+      // method. Report it instead of letting it escape (e.g. out of main()).
+      lastError = 'Native Bluetooth channel unavailable ($method)';
     }
+    notifyListeners();
+    return false;
   }
 
   void _appendMessage(String deviceId, BleMessage message) {

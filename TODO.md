@@ -15,7 +15,8 @@
 
 ## P0: 앱이 동작하지 않음
 
-### 1. MethodChannel 예외 처리 범위가 좁음 `코드`
+### 1. MethodChannel 예외 처리 범위가 좁음 `코드` ✅ 해결
+- 해결: `_invoke()`가 `MissingPluginException`도 잡아서 `lastError`로 보고합니다. 테스트: `test/ble_app_controller_test.dart`의 `native channel errors`.
 - 권한 요청은 permission_handler로 옮겼습니다(`3caf811`). 그래서 iOS에서 `checkPermissions`가 없어 `runApp()` 전에 예외가 나던 원인은 사라졌습니다.
 - 다만 `_invoke()`는 여전히 `PlatformException`만 잡습니다. 채널이 등록되지 않으면(2번) `MissingPluginException`이 그대로 올라가서 `runApp()`을 막습니다.
 - 수정 방향: `_invoke()`의 catch 범위를 `MissingPluginException`까지 넓힙니다.
