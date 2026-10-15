@@ -9,6 +9,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.BroadcastReceiver
 import android.content.IntentFilter
+import android.content.SharedPreferences
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
@@ -66,6 +67,8 @@ class BluetoothBackgroundService : Service() {
     // pending autoConnect would otherwise complete whenever the device shows up again.
     private val pendingConnections = ConcurrentHashMap<String, BluetoothGatt>()
     private val pendingBondAddresses = ConcurrentHashMap.newKeySet<String>()
+    // Nearby devices already reported to Dart, with the name they were reported under.
+    private val reportedNearby = ConcurrentHashMap<String, String>()
 
     @Volatile
     private var gattServer: BluetoothGattServer? = null
@@ -93,6 +96,24 @@ class BluetoothBackgroundService : Service() {
 
     private val handler = Handler(Looper.getMainLooper())
     private val scanStartLimiter = ScanStartLimiter()
+
+    @Volatile
+    private var scanMode = ScanSettings.SCAN_MODE_LOW_POWER
+
+    // Restarts the scan when the app moves between foreground and background. Debounced:
+    // dialogs and permission prompts pause and resume the activity in quick succession.
+    private val applyScanMode = Runnable {
+        val wanted = if (BleEventBus.appInForeground) {
+            ScanSettings.SCAN_MODE_LOW_LATENCY
+        } else {
+            ScanSettings.SCAN_MODE_LOW_POWER
+        }
+        if (isScanning && scanMode != wanted) {
+            stopScan()
+            startScan()
+            emitStatus()
+        }
+    }
     private val retryScan = Runnable {
         startScan()
         emitStatus()
@@ -104,6 +125,12 @@ class BluetoothBackgroundService : Service() {
     override fun onCreate() {
         super.onCreate()
         BleEventBus.init(this)
+        getSharedPreferences(FLUTTER_PREFS_NAME, Context.MODE_PRIVATE)
+            .registerOnSharedPreferenceChangeListener(flutterPrefsListener)
+        BleEventBus.foregroundListener = {
+            handler.removeCallbacks(applyScanMode)
+            handler.postDelayed(applyScanMode, SCAN_MODE_DEBOUNCE_MS)
+        }
         createNotificationChannel()
         startForegroundSafely()
         ContextCompat.registerReceiver(
@@ -148,6 +175,9 @@ class BluetoothBackgroundService : Service() {
             ACTION_RESTORE -> {
                 restoreStateFromPrefs()
                 emitCurrentConnections()
+                // A newly attached Dart side has an empty nearby list; report everything
+                // again instead of only changes.
+                reportedNearby.clear()
             }
             ACTION_START_ADVERTISING -> {
                 prefs.edit().putBoolean(PREF_ADVERTISING, true).apply()
@@ -168,7 +198,10 @@ class BluetoothBackgroundService : Service() {
                 stopScan()
                 disconnectAll()
             }
-            ACTION_SCAN_NOW -> startScan()
+            ACTION_SCAN_NOW -> {
+                reportedNearby.clear()
+                startScan()
+            }
             ACTION_CONNECT_DEVICE -> connectDevice(
                 intent?.getStringExtra(EXTRA_DEVICE_ID),
                 intent?.getBooleanExtra(EXTRA_PAIR, false) == true
@@ -200,6 +233,10 @@ class BluetoothBackgroundService : Service() {
         disconnectAll()
         runCatching { unregisterReceiver(bondStateReceiver) }
         runCatching { unregisterReceiver(adapterStateReceiver) }
+        getSharedPreferences(FLUTTER_PREFS_NAME, Context.MODE_PRIVATE)
+            .unregisterOnSharedPreferenceChangeListener(flutterPrefsListener)
+        BleEventBus.foregroundListener = null
+        handler.removeCallbacks(applyScanMode)
         super.onDestroy()
     }
 
@@ -242,7 +279,21 @@ class BluetoothBackgroundService : Service() {
             ?.forEach { connectGattIfNeeded(it) }
     }
 
-    private fun loadRegisteredDeviceIds(): Set<String> {
+    // Read on every scan result and disconnect, so cache it; Dart writes the list to the
+    // same SharedPreferences file in this process, which invalidates the cache.
+    @Volatile
+    private var registeredDeviceIds: Set<String>? = null
+    private val flutterPrefsListener =
+        SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+            if (key == FLUTTER_REGISTERED_DEVICES_KEY) {
+                registeredDeviceIds = null
+            }
+        }
+
+    private fun loadRegisteredDeviceIds(): Set<String> =
+        registeredDeviceIds ?: readRegisteredDeviceIds().also { registeredDeviceIds = it }
+
+    private fun readRegisteredDeviceIds(): Set<String> {
         val flutterPrefs = getSharedPreferences(FLUTTER_PREFS_NAME, Context.MODE_PRIVATE)
         val raw = flutterPrefs.getString(FLUTTER_REGISTERED_DEVICES_KEY, null) ?: return emptySet()
         return runCatching {
@@ -370,10 +421,18 @@ class BluetoothBackgroundService : Service() {
                 .setServiceUuid(SERVICE_PARCEL_UUID)
                 .build()
         )
+        // Fast discovery while the user is looking at the app; in the background the
+        // scan only needs to notice peers eventually (reconnects use autoConnect).
+        val mode = if (BleEventBus.appInForeground) {
+            ScanSettings.SCAN_MODE_LOW_LATENCY
+        } else {
+            ScanSettings.SCAN_MODE_LOW_POWER
+        }
         val settings = ScanSettings.Builder()
-            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+            .setScanMode(mode)
             .build()
         bleScanner.startScan(filters, settings, scanCallback)
+        scanMode = mode
         isScanning = true
     }
 
@@ -795,14 +854,19 @@ class BluetoothBackgroundService : Service() {
         override fun onScanResult(callbackType: Int, result: ScanResult?) {
             val device = result?.device ?: return
             val address = device.address ?: return
-            val knownDeviceIds = loadRegisteredDeviceIds()
-            BleEventBus.emit(
-                mapOf(
-                    "type" to "discovered",
-                    "deviceId" to address,
-                    "name" to (result.scanRecord?.deviceName ?: device.name ?: "")
+            val name = result.scanRecord?.deviceName ?: device.name ?: ""
+            // A peer advertises several times a second; each event rebuilt Dart UI. Report
+            // a device only when it's new or its name changed.
+            if (reportedNearby.put(address, name) != name) {
+                BleEventBus.emit(
+                    mapOf(
+                        "type" to "discovered",
+                        "deviceId" to address,
+                        "name" to name
+                    )
                 )
-            )
+            }
+            val knownDeviceIds = loadRegisteredDeviceIds()
             if (
                 isCentralEnabled &&
                 device.bondState == BluetoothDevice.BOND_BONDED &&
@@ -1170,6 +1234,7 @@ class BluetoothBackgroundService : Service() {
         private const val ATT_HEADER_SIZE = 3
         private const val MAX_ATTRIBUTE_LENGTH = 512
         private const val SCAN_RETRY_DELAY_MS = 30_000L
+        private const val SCAN_MODE_DEBOUNCE_MS = 2_000L
         private val CLIENT_CONFIG_DESCRIPTOR_UUID =
             UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
     }

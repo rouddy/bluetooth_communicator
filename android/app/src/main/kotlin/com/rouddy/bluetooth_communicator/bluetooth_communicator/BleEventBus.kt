@@ -16,6 +16,16 @@ object BleEventBus {
     /** Whether the Flutter activity is in the foreground (between onResume and onPause). */
     @Volatile
     var appInForeground = false
+        set(value) {
+            if (field == value) {
+                return
+            }
+            field = value
+            foregroundListener?.invoke(value)
+        }
+
+    /** Set by the service to adapt its scan mode; called on the main thread. */
+    var foregroundListener: ((Boolean) -> Unit)? = null
 
     /** Sets up the persistent store; called by both the service and the activity. */
     @Synchronized
