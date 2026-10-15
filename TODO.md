@@ -15,23 +15,29 @@
 
 ## P0: 앱이 동작하지 않음
 
-### 1. MethodChannel 예외 처리 범위가 좁음 `코드`
+### 1. MethodChannel 예외 처리 범위가 좁음 `코드` ✅ 해결
+- 해결: `_invoke()`가 `MissingPluginException`도 잡아서 `lastError`로 보고합니다. 테스트: `test/ble_app_controller_test.dart`의 `native channel errors`.
 - 권한 요청은 permission_handler로 옮겼습니다(`3caf811`). 그래서 iOS에서 `checkPermissions`가 없어 `runApp()` 전에 예외가 나던 원인은 사라졌습니다.
 - 다만 `_invoke()`는 여전히 `PlatformException`만 잡습니다. 채널이 등록되지 않으면(2번) `MissingPluginException`이 그대로 올라가서 `runApp()`을 막습니다.
 - 수정 방향: `_invoke()`의 catch 범위를 `MissingPluginException`까지 넓힙니다.
 
-### 2. iOS 채널 등록이 `window?.rootViewController`에 의존함 `추정`
+### 2. iOS 채널 등록이 `window?.rootViewController`에 의존함 `확인됨` ✅ 해결
+- 확인: AlgorigoSE(iOS 27.0.1)에서 `integration_test/app_test.dart`가 `Native Bluetooth channel unavailable (initialize)`와 EventChannel `listen`의 `MissingPluginException`으로 실패했습니다.
+- 해결: 채널을 `didInitializeImplicitFlutterEngine`에서 `engineBridge.applicationRegistrar.messenger()`로 등록합니다. 같은 테스트가 통과합니다.
 - UIScene 생명주기(`SceneDelegate` + `UISceneStoryboardFile`)에서는 `didFinishLaunchingWithOptions` 시점에 AppDelegate의 `window`가 nil일 가능성이 높습니다.
 - 그러면 `guard`에서 바로 return해서 MethodChannel과 EventChannel이 등록되지 않습니다.
 - 수정 방향: `didInitializeImplicitFlutterEngine(_:)`에서 `engineBridge.applicationRegistrar.messenger()`로 채널을 등록합니다.
 - 실제 iOS 기기에서 먼저 확인해야 합니다.
 
-### 3. `main()`이 `initialize()`를 끝까지 기다린 뒤에 `runApp()`을 호출함 `확인됨`
+### 3. `main()`이 `initialize()`를 끝까지 기다린 뒤에 `runApp()`을 호출함 `확인됨` ✅ 해결
+- 해결: `runApp()`을 먼저 호출하고 `initialize()`는 그 뒤에 비동기로 실행합니다. 초기화 중에는 AppBar 아래에 진행 표시줄을 보여주고, 예외는 `lastError`로 보고합니다. 초기화가 겹치는 호출은 무시합니다. 테스트: `test/app_startup_test.dart`. S23에서 권한 팝업 뒤에 스플래시가 아닌 홈 화면이 그려지는 것을 확인했습니다.
 - 첫 실행에는 권한 팝업이 스플래시 위에 뜹니다.
 - `initialize()`에서 예외가 나면 화면이 영원히 뜨지 않습니다(1번이 그 경우).
 - 수정 방향: `runApp()`을 먼저 호출하고, 초기화는 그 뒤에 비동기로 진행합니다. 초기화 중 상태와 실패 상태를 UI에 표시합니다.
 
-### 4. iOS에 GATT server가 없음 `코드`
+### 4. iOS에 GATT server가 없음 `코드` ✅ 해결
+- 해결: Android와 같은 characteristic(write, writeWithoutResponse, notify)을 가진 서비스를 등록하고, 서비스가 등록된 뒤에 광고를 시작합니다. write는 `message` 이벤트로, 구독은 `connected`로 처리하고, 답장은 notify로 보냅니다. 전송 큐가 가득 차면 다시 보냅니다. 광고 OFF·Bluetooth OFF·상태 복원도 처리합니다.
+- 확인: S23(Android central) ↔ AlgorigoSE(iOS peripheral)에서 `integration_test/peripheral_exchange_test.dart` 통과. 페어링, 연결, S23→iPhone `20261015`, iPhone→S23 `reply from peripheral 안녕`을 확인했습니다. iOS central ↔ Android peripheral 조합과 iOS ↔ iOS 조합은 아직 테스트하지 않았습니다.
 - iOS는 서비스 UUID를 광고만 하고 `CBMutableService`를 등록하지 않습니다.
 - 그래서 Android central → iOS peripheral 조합과 iOS ↔ iOS 조합에서는 메시지가 오가지 않습니다.
 - 수정 방향: Android와 같은 characteristic을 등록합니다(write, writeWithoutResponse, notify).
@@ -135,7 +141,8 @@
 - Dart 입력창에는 길이 제한이 없어서 긴 메시지는 실패하거나 오류만 납니다.
 - 수정 방향: 입력 단계에서 UTF-8 바이트 수를 제한하거나, 프로토콜 차원에서 분할 전송합니다(23번 참고).
 
-### 18. 광고 시작이 겹칠 수 있음 `추정`
+### 18. 광고 시작이 겹칠 수 있음 `확인됨`
+- S23에서 권한을 허용한 직후 설정 화면에 `Advertising failed: 3`(`ALREADY_STARTED`)이 표시되는 것을 확인했습니다.
 - Dart `initialize()`는 `ACTION_RESTORE`(광고 시작)와 `ACTION_START_ADVERTISING`을 연달아 보냅니다.
 - `isAdvertising`은 `onStartSuccess`가 와야 true가 되므로, 두 번째 시작이 `ADVERTISE_FAILED_ALREADY_STARTED`로 실패할 수 있습니다.
 - 그러면 실제로는 광고 중인데 `isAdvertising=false`가 되고, 오류 이벤트도 나갑니다.
