@@ -73,6 +73,7 @@ void main() {
     expect(find.byType(LinearProgressIndicator), findsNothing);
     await tester.tap(find.byIcon(Icons.settings));
     await tester.pumpAndSettle();
-    expect(find.textContaining('초기화 실패'), findsOneWidget);
+    // On the settings page (and in the SnackBar, if it's still showing).
+    expect(find.textContaining('초기화 실패'), findsWidgets);
   });
 }

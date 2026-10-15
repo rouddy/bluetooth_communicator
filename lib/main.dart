@@ -29,16 +29,44 @@ void main() {
   unawaited(controller.initialize());
 }
 
-class MyApp extends StatelessWidget {
+class MyApp extends StatefulWidget {
   const MyApp({super.key, required this.controller});
 
   final BleAppController controller;
+
+  @override
+  State<MyApp> createState() => _MyAppState();
+}
+
+class _MyAppState extends State<MyApp> {
+  final _messengerKey = GlobalKey<ScaffoldMessengerState>();
+  StreamSubscription<String>? _errors;
+
+  @override
+  void initState() {
+    super.initState();
+    // Errors used to show up only on the settings page; surface each one where the
+    // user is, whatever page that is.
+    _errors = widget.controller.errors.listen((message) {
+      _messengerKey.currentState
+        ?..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(content: Text(message)));
+    });
+  }
+
+  @override
+  void dispose() {
+    _errors?.cancel();
+    super.dispose();
+  }
 
   // MaterialApp isn't rebuilt on controller changes (which used to rebuild the whole
   // app, including every route); each page listens to the controller itself.
   @override
   Widget build(BuildContext context) {
+    final controller = widget.controller;
     return MaterialApp(
+      scaffoldMessengerKey: _messengerKey,
       title: 'Bluetooth Communicator',
       theme: ThemeData(colorSchemeSeed: Colors.blue, useMaterial3: true),
       home: HomePage(controller: controller),
@@ -267,6 +295,11 @@ class SettingsPage extends StatelessWidget {
               leading: const Icon(Icons.error_outline),
               title: const Text('오류'),
               subtitle: Text(controller.lastError!),
+              trailing: IconButton(
+                tooltip: '오류 지우기',
+                icon: const Icon(Icons.close),
+                onPressed: controller.clearError,
+              ),
             ),
         ],
       ),
@@ -550,7 +583,22 @@ class BleAppController extends ChangeNotifier {
   bool advertisingEnabled = false;
   bool centralEnabled = false;
   String backgroundStatus = 'idle';
+  /// The most recent error, shown on the settings page until cleared.
   String? lastError;
+  final StreamController<String> _errors = StreamController<String>.broadcast();
+
+  /// Each error as it happens, for transient UI (a SnackBar).
+  Stream<String> get errors => _errors.stream;
+
+  void _reportError(String message) {
+    lastError = message;
+    _errors.add(message);
+  }
+
+  void clearError() {
+    lastError = null;
+    notifyListeners();
+  }
   bool initializing = false;
 
   /// Both native sides report `bluetooth-off` while the adapter is powered off.
@@ -666,7 +714,7 @@ class BleAppController extends ChangeNotifier {
     try {
       await _initialize();
     } catch (error) {
-      lastError = '초기화 실패: $error';
+      _reportError('초기화 실패: $error');
     } finally {
       initializing = false;
       notifyListeners();
@@ -680,13 +728,13 @@ class BleAppController extends ChangeNotifier {
     _eventsSubscription = _eventChannel.receiveBroadcastStream().listen(
       _handleEvent,
       onError: (Object error) {
-        lastError = error.toString();
+        _reportError(error.toString());
         notifyListeners();
       },
     );
     final granted = await checkPermissions() || await requestPermissions();
     if (!granted) {
-      lastError = 'Bluetooth 권한이 없어 기기 검색과 연결을 할 수 없습니다.';
+      _reportError('Bluetooth 권한이 없어 기기 검색과 연결을 할 수 없습니다.');
       notifyListeners();
       return;
     }
@@ -842,11 +890,11 @@ class BleAppController extends ChangeNotifier {
       await _methodChannel.invokeMethod<void>(method, arguments);
       return true;
     } on PlatformException catch (error) {
-      lastError = '${error.code}: ${error.message}';
+      _reportError('${error.code}: ${error.message}');
     } on MissingPluginException {
       // The native side didn't register the channel or doesn't implement this
       // method. Report it instead of letting it escape (e.g. out of main()).
-      lastError = 'Native Bluetooth channel unavailable ($method)';
+      _reportError('Native Bluetooth channel unavailable ($method)');
     }
     notifyListeners();
     return false;
@@ -944,7 +992,9 @@ class BleAppController extends ChangeNotifier {
         _settleMessage(event, MessageStatus.failed);
         break;
       case 'error':
-        lastError = event['message'] as String?;
+        if (event['message'] case final String message) {
+          _reportError(message);
+        }
         break;
       default:
         break;
@@ -1044,6 +1094,7 @@ class BleAppController extends ChangeNotifier {
   @override
   void dispose() {
     _eventsSubscription?.cancel();
+    _errors.close();
     super.dispose();
   }
 }
