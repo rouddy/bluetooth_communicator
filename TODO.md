@@ -57,7 +57,8 @@
   - 페어링 해제 API(`removeBond`)는 공개 API가 아니므로, 시스템 Bluetooth 설정 화면으로 안내합니다.
   - 네이티브 서비스는 Dart prefs를 직접 읽어서 판단합니다. 그래서 삭제 후에는 자동 재연결 대상에서도 빠지는지 확인해야 합니다.
 
-### 6. 서비스가 시스템에 의해 재시작되면 상태가 복원되지 않음 `코드`
+### 6. 서비스가 시스템에 의해 재시작되면 상태가 복원되지 않음 `확인됨` ✅ 해결
+- 확인과 해결: S23에서 앱 프로세스를 `kill -9`로 종료하면 약 10초 뒤 서비스가 다시 시작되는데, 수정 전에는 상태가 `idle`이었습니다. intent가 null이면 `ACTION_RESTORE`로 처리하도록 고친 뒤에는 `advertising scanning connected:1`로 복원되고, 페어링된 기기에도 다시 연결됩니다.
 - `START_STICKY` 서비스가 다시 시작될 때는 `intent`가 null로 들어옵니다. 그런데 `onStartCommand`의 `when (intent?.action)`에 해당하는 분기가 없습니다.
 - 그 결과 알림은 계속 떠 있는데 광고, 스캔, 재연결은 하나도 동작하지 않습니다.
 - 수정 방향: `intent == null`이면 `ACTION_RESTORE`처럼 처리합니다.

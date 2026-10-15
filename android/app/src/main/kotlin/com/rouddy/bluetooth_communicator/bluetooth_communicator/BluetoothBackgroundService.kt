@@ -117,7 +117,9 @@ class BluetoothBackgroundService : Service() {
 
     @SuppressLint("MissingPermission")
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
+        // A START_STICKY service that the system restarts after killing the process gets
+        // a null intent; restore the saved state then, or it would sit idle.
+        when (intent?.action ?: ACTION_RESTORE) {
             ACTION_RESTORE -> {
                 restoreStateFromPrefs()
                 emitCurrentConnections()
@@ -143,13 +145,13 @@ class BluetoothBackgroundService : Service() {
             }
             ACTION_SCAN_NOW -> startScan()
             ACTION_CONNECT_DEVICE -> connectDevice(
-                intent.getStringExtra(EXTRA_DEVICE_ID),
-                intent.getBooleanExtra(EXTRA_PAIR, false)
+                intent?.getStringExtra(EXTRA_DEVICE_ID),
+                intent?.getBooleanExtra(EXTRA_PAIR, false) == true
             )
-            ACTION_DISCONNECT_DEVICE -> disconnectDevice(intent.getStringExtra(EXTRA_DEVICE_ID))
+            ACTION_DISCONNECT_DEVICE -> disconnectDevice(intent?.getStringExtra(EXTRA_DEVICE_ID))
             ACTION_SEND_MESSAGE -> {
-                val deviceId = intent.getStringExtra(EXTRA_DEVICE_ID)
-                val message = intent.getStringExtra(EXTRA_MESSAGE)
+                val deviceId = intent?.getStringExtra(EXTRA_DEVICE_ID)
+                val message = intent?.getStringExtra(EXTRA_MESSAGE)
                 if (!deviceId.isNullOrBlank() && !message.isNullOrBlank()) {
                     sendMessage(deviceId, message)
                 }
