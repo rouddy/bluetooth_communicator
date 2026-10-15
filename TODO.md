@@ -172,7 +172,8 @@
 - 그러면 실제로는 광고 중인데 `isAdvertising=false`가 되고, 오류 이벤트도 나갑니다.
 - 수정 방향: "광고 요청됨" 상태를 따로 두고, 코드 3(`ALREADY_STARTED`)은 성공으로 처리합니다.
 
-### 19. 플랫폼 채널 계약이 서로 다름 `코드`
+### 19. 플랫폼 채널 계약이 서로 다름 `코드` ✅ 해결
+- 해결: `status` 이벤트를 구조화된 필드 `{advertising, scanning, connectedCount, bluetoothOn}`로 바꾸고, 두 플랫폼이 같은 형태로 보냅니다. 표시 문구는 Dart의 `BleStatus`가 이전과 같은 형식으로 만듭니다. iOS의 `ios-ready`, `advertising-off` 같은 개별 문자열은 없앴습니다. `initialize`는 두 플랫폼 모두 Bool을 돌려줍니다(iOS는 Bluetooth 권한이 `allowedAlways`인지). `checkPermissions`/`requestPermissions`는 이미 계약에서 빠져 있습니다(permission_handler 사용). 테스트: `BleStatus` 단위 테스트, 상태·배너·화면 갱신 위젯 테스트, Fold5 스모크 테스트. Fold5에서 상태 문구, Bluetooth를 껐다 켤 때의 배너를 확인했습니다. iOS는 빌드만 확인했습니다.
 - `status` 문자열 형식이 다릅니다. Android는 `advertising scanning connected:N`, iOS는 `ios-ready`, `advertising-off` 같은 값을 씁니다.
 - `initialize` 반환값도 다릅니다. Android는 Bool(권한이 없으면 false), iOS는 nil을 돌려줍니다.
 - 수정 방향: 계약 문서를 정리하고, `status`를 구조화된 필드(`advertising`, `scanning`, `connectedCount`)로 바꿉니다.

@@ -8,8 +8,6 @@
 // On the first run the OS shows the Bluetooth permission dialog, which this
 // test can't tap. Allow it on the phone within the timeout.
 
-import 'dart:io' show Platform;
-
 import 'package:bluetooth_communicator/main.dart' as app;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -31,10 +29,8 @@ void main() {
     await tester.pump(const Duration(seconds: 2));
 
     expect(find.textContaining('channel unavailable'), findsNothing);
-    if (Platform.isIOS) {
-      // iOS emits a status event as soon as Dart listens, so a status other
-      // than the initial 'idle' proves the event channel is registered.
-      expect(backgroundStatus(tester), isNot('idle'));
-    }
+    // Both native sides send a status event once Dart listens and initializes,
+    // so anything but the initial 'unknown' proves the event channel works.
+    expect(backgroundStatus(tester), isNot('unknown'));
   });
 }

@@ -34,12 +34,15 @@ void main() {
     await controller.initialize();
     await tester.pumpAndSettle();
 
-    Future<void> nativeStatus(String status) async {
+    Future<void> nativeStatus({required bool bluetoothOn}) async {
       await messenger.handlePlatformMessage(
         _eventsChannel.name,
         const StandardMethodCodec().encodeSuccessEnvelope({
           'type': 'status',
-          'status': status,
+          'advertising': bluetoothOn,
+          'scanning': bluetoothOn,
+          'connectedCount': 0,
+          'bluetoothOn': bluetoothOn,
         }),
         (_) {},
       );
@@ -48,10 +51,10 @@ void main() {
 
     expect(find.text('Bluetooth가 꺼져 있습니다'), findsNothing);
 
-    await nativeStatus('bluetooth-off');
+    await nativeStatus(bluetoothOn: false);
     expect(find.text('Bluetooth가 꺼져 있습니다'), findsOneWidget);
 
-    await nativeStatus('advertising scanning');
+    await nativeStatus(bluetoothOn: true);
     expect(find.text('Bluetooth가 꺼져 있습니다'), findsNothing);
   });
 }

@@ -46,7 +46,13 @@ void main() {
 
     await tester.tap(find.byIcon(Icons.settings));
     await tester.pumpAndSettle();
-    await nativeEvent({'type': 'status', 'status': 'advertising scanning'});
+    await nativeEvent({
+      'type': 'status',
+      'advertising': true,
+      'scanning': true,
+      'connectedCount': 0,
+      'bluetoothOn': true,
+    });
     expect(find.text('advertising scanning'), findsOneWidget);
 
     await tester.pageBack();

@@ -35,8 +35,10 @@ import UIKit
       }
       switch call.method {
       case "initialize":
+        // Like Android: whether the Bluetooth permission is granted. Dart requests it
+        // (permission_handler) before calling this.
         self.bleManager.restoreState()
-        result(nil)
+        result(CBManager.authorization == .allowedAlways)
       case "setAdvertisingEnabled":
         let args = call.arguments as? [String: Any]
         let enabled = (args?["enabled"] as? Bool) ?? false
@@ -117,6 +119,12 @@ final class IOSBleBackgroundManager: NSObject, FlutterStreamHandler {
   private var advertisingEnabled = false
   private var centralEnabled = false
 
+  // What's reported in `status`. Tracked from delegate callbacks rather than read off
+  // the managers: they're lazy, and touching them early shows the Bluetooth prompt.
+  private var isAdvertising = false
+  private var isScanning = false
+  private var bluetoothOn = true
+
   // Peripheral role: the message service that remote centrals write to and subscribe
   // to for our replies (mirrors the Android GATT server).
   private var messageCharacteristic: CBMutableCharacteristic?
@@ -130,7 +138,7 @@ final class IOSBleBackgroundManager: NSObject, FlutterStreamHandler {
 
   func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
     eventSink = events
-    emit(type: "status", payload: ["status": "ios-ready"])
+    emitStatus()
     // Messages that arrived before Dart listened (e.g. the system relaunched the app in
     // the background for a BLE event through state restoration).
     let pending = prefs.array(forKey: pendingMessagesKey) as? [[String: Any]] ?? []
@@ -162,8 +170,9 @@ final class IOSBleBackgroundManager: NSObject, FlutterStreamHandler {
       startAdvertisingIfPossible()
     } else {
       peripheralManager.stopAdvertising()
+      isAdvertising = false
       removeMessageService()
-      emit(type: "status", payload: ["status": "advertising-off"])
+      emitStatus()
     }
   }
 
@@ -174,7 +183,8 @@ final class IOSBleBackgroundManager: NSObject, FlutterStreamHandler {
       startScanningIfPossible()
     } else {
       centralManager.stopScan()
-      emit(type: "status", payload: ["status": "scan-off"])
+      isScanning = false
+      emitStatus()
     }
   }
 
@@ -348,6 +358,7 @@ final class IOSBleBackgroundManager: NSObject, FlutterStreamHandler {
       return
     }
     emit(type: "disconnected", payload: ["deviceId": id.uuidString])
+    emitStatus()
   }
 
   private func startScanningIfPossible() {
@@ -355,7 +366,8 @@ final class IOSBleBackgroundManager: NSObject, FlutterStreamHandler {
     centralManager.scanForPeripherals(withServices: [serviceUUID], options: [
       CBCentralManagerScanOptionAllowDuplicatesKey: false
     ])
-    emit(type: "status", payload: ["status": "scanning"])
+    isScanning = true
+    emitStatus()
   }
 
   private func emit(type: String, payload: [String: Any]) {
@@ -373,12 +385,23 @@ final class IOSBleBackgroundManager: NSObject, FlutterStreamHandler {
   }
 
   private var nowMillis: Int { Int(Date().timeIntervalSince1970 * 1000) }
+
+  /// Same shape as the Android service's status: Dart builds the label from it.
+  private func emitStatus() {
+    emit(type: "status", payload: [
+      "advertising": isAdvertising,
+      "scanning": isScanning,
+      "connectedCount": Set(connectedPeripheralIds).union(subscribedCentrals.keys).count,
+      "bluetoothOn": bluetoothOn,
+    ])
+  }
 }
 
 extension IOSBleBackgroundManager: CBCentralManagerDelegate {
   func centralManagerDidUpdateState(_ central: CBCentralManager) {
     switch central.state {
     case .poweredOn:
+      bluetoothOn = true
       if centralEnabled {
         startScanningIfPossible()
         // Connections don't survive a power cycle; bring back the ones that were up.
@@ -403,7 +426,9 @@ extension IOSBleBackgroundManager: CBCentralManagerDelegate {
       writableCharacteristics.removeAll()
       Array(pendingWrites.keys).forEach { failPendingWrites($0, error: "Bluetooth turned off") }
       dropped.forEach { emitDisconnectedIfUnlinked($0) }
-      emit(type: "status", payload: ["status": "bluetooth-off"])
+      isScanning = false
+      bluetoothOn = false
+      emitStatus()
     default:
       break
     }
@@ -422,7 +447,7 @@ extension IOSBleBackgroundManager: CBCentralManagerDelegate {
         connectedPeripheralIds.insert(peripheral.identifier)
       }
     }
-    emit(type: "status", payload: ["status": "central-restored"])
+    emitStatus()
   }
 
   func centralManager(
@@ -480,12 +505,15 @@ extension IOSBleBackgroundManager: CBPeripheralManagerDelegate {
   func peripheralManagerDidUpdateState(_ peripheral: CBPeripheralManager) {
     switch peripheral.state {
     case .poweredOn:
+      bluetoothOn = true
       if advertisingEnabled {
         startAdvertisingIfPossible()
       }
     case .poweredOff:
       resetPeripheralRole()
-      emit(type: "status", payload: ["status": "bluetooth-off"])
+      isAdvertising = false
+      bluetoothOn = false
+      emitStatus()
     default:
       break
     }
@@ -502,7 +530,7 @@ extension IOSBleBackgroundManager: CBPeripheralManagerDelegate {
       serviceAdded = true
       characteristic.subscribedCentrals?.forEach { subscribedCentrals[$0.identifier] = $0 }
     }
-    emit(type: "status", payload: ["status": "peripheral-restored"])
+    emitStatus()
   }
 
   func peripheralManager(_ peripheral: CBPeripheralManager, didAdd service: CBService, error: Error?) {
@@ -523,7 +551,8 @@ extension IOSBleBackgroundManager: CBPeripheralManagerDelegate {
       emit(type: "error", payload: ["message": "Advertising failed: \(error.localizedDescription)"])
       return
     }
-    emit(type: "status", payload: ["status": "advertising"])
+    isAdvertising = true
+    emitStatus()
   }
 
   func peripheralManager(
@@ -534,6 +563,7 @@ extension IOSBleBackgroundManager: CBPeripheralManagerDelegate {
     guard characteristic.uuid == messageCharacteristicUUID else { return }
     if subscribedCentrals.updateValue(central, forKey: central.identifier) == nil {
       emit(type: "connected", payload: ["deviceId": central.identifier.uuidString])
+      emitStatus()
     }
   }
 
@@ -618,6 +648,7 @@ extension IOSBleBackgroundManager: CBPeripheralDelegate {
     guard let error else {
       subscribeAttempts.removeValue(forKey: id)
       emit(type: "connected", payload: ["deviceId": id.uuidString])
+      emitStatus()
       return
     }
     // The peer requires an encrypted link. The first attempt makes iOS start pairing

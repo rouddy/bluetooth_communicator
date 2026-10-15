@@ -48,6 +48,34 @@ void main() {
     messenger.setMockStreamHandler(_eventsChannel, null);
   });
 
+  group('BleStatus', () {
+    BleStatus status({
+      bool advertising = false,
+      bool scanning = false,
+      int connectedCount = 0,
+      bool bluetoothOn = true,
+    }) => BleStatus.fromEvent({
+      'type': 'status',
+      'advertising': advertising,
+      'scanning': scanning,
+      'connectedCount': connectedCount,
+      'bluetoothOn': bluetoothOn,
+    });
+
+    test('labels the structured status the same on both platforms', () {
+      expect(status().label, 'idle');
+      expect(status(advertising: true, scanning: true).label, 'advertising scanning');
+      expect(status(scanning: true, connectedCount: 2).label, 'scanning connected:2');
+      expect(status(advertising: true, bluetoothOn: false).label, 'bluetooth-off');
+    });
+
+    test('the controller reports unknown until the first status event', () async {
+      final controller = BleAppController();
+      expect(controller.backgroundStatus, 'unknown');
+      expect(controller.bluetoothOff, isFalse);
+    });
+  });
+
   group('native channel errors', () {
     test('initialize reports an unregistered native channel instead of '
         'throwing', () async {

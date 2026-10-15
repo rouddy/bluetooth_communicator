@@ -717,10 +717,15 @@ class BluetoothBackgroundService : Service() {
             }
             else -> "idle"
         }
+        // Structured, so both platforms report the same thing (Dart builds the label);
+        // the string above is only the foreground-service notification text.
         BleEventBus.emit(
             mapOf(
                 "type" to "status",
-                "status" to status
+                "advertising" to isAdvertising,
+                "scanning" to isScanning,
+                "connectedCount" to connectionCount,
+                "bluetoothOn" to (adapter?.state == BluetoothAdapter.STATE_ON)
             )
         )
         updateNotification(status)

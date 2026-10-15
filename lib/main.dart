@@ -613,7 +613,11 @@ class BleAppController extends ChangeNotifier {
 
   bool advertisingEnabled = false;
   bool centralEnabled = false;
-  String backgroundStatus = 'idle';
+  /// The last native status; null until the first status event.
+  BleStatus? status;
+
+  /// [status] as text for the settings page, `unknown` before any status event.
+  String get backgroundStatus => status?.label ?? 'unknown';
   /// The most recent error, shown on the settings page until cleared.
   String? lastError;
   final StreamController<String> _errors = StreamController<String>.broadcast();
@@ -632,8 +636,7 @@ class BleAppController extends ChangeNotifier {
   }
   bool initializing = false;
 
-  /// Both native sides report `bluetooth-off` while the adapter is powered off.
-  bool get bluetoothOff => backgroundStatus == 'bluetooth-off';
+  bool get bluetoothOff => status?.bluetoothOn == false;
   bool permissionsGranted = false;
   bool permissionsPermanentlyDenied = false;
 
@@ -1014,7 +1017,7 @@ class BleAppController extends ChangeNotifier {
     final event = Map<String, dynamic>.from(data.cast<String, dynamic>());
     switch (event['type']) {
       case 'status':
-        backgroundStatus = (event['status'] as String?) ?? backgroundStatus;
+        status = BleStatus.fromEvent(event);
         break;
       case 'discovered':
         final device = BleDevice.fromMap(event);
@@ -1204,6 +1207,43 @@ class BleDevice {
         'identifier': identifier,
         'name': name,
       };
+}
+
+/// The `status` event both native sides send whenever their state changes.
+class BleStatus {
+  const BleStatus({
+    required this.advertising,
+    required this.scanning,
+    required this.connectedCount,
+    required this.bluetoothOn,
+  });
+
+  factory BleStatus.fromEvent(Map<String, dynamic> event) => BleStatus(
+    advertising: event['advertising'] == true,
+    scanning: event['scanning'] == true,
+    connectedCount: event['connectedCount'] as int? ?? 0,
+    bluetoothOn: event['bluetoothOn'] != false,
+  );
+
+  final bool advertising;
+  final bool scanning;
+
+  /// Distinct peers with at least one link (as central or peripheral).
+  final int connectedCount;
+  final bool bluetoothOn;
+
+  /// e.g. `advertising scanning connected:1`, `idle`, or `bluetooth-off`.
+  String get label {
+    if (!bluetoothOn) {
+      return 'bluetooth-off';
+    }
+    final parts = [
+      if (advertising) 'advertising',
+      if (scanning) 'scanning',
+      if (connectedCount > 0) 'connected:$connectedCount',
+    ];
+    return parts.isEmpty ? 'idle' : parts.join(' ');
+  }
 }
 
 enum LinkState { disconnected, connecting, bonding, connected }
