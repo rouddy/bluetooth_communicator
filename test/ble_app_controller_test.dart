@@ -218,6 +218,100 @@ void main() {
     expect(controller.unreadCountFor('AA:AA'), 1);
   });
 
+  group('message history', () {
+    Future<void> incoming(String deviceId, String text) {
+      return messenger.handlePlatformMessage(
+        _eventsChannel.name,
+        const StandardMethodCodec().encodeSuccessEnvelope({
+          'type': 'message',
+          'deviceId': deviceId,
+          'message': text,
+        }),
+        (_) {},
+      );
+    }
+
+    test('survives a restart, including unread counts and send status', () async {
+      registerNativeHandler();
+      final first = BleAppController();
+      await first.initialize();
+      await incoming('AA:AA', 'hi');
+      await first.sendMessage('AA:AA', 'reply');
+      final reply = first.messagesByDevice['AA:AA']!.last;
+      await messenger.handlePlatformMessage(
+        _eventsChannel.name,
+        const StandardMethodCodec().encodeSuccessEnvelope({
+          'type': 'messageSent',
+          'deviceId': 'AA:AA',
+          'messageId': reply.id,
+        }),
+        (_) {},
+      );
+      await pumpEventQueue();
+
+      // A new controller over the same storage, like the next app launch.
+      final restarted = BleAppController();
+      await restarted.initialize();
+
+      final messages = restarted.messagesByDevice['AA:AA']!;
+      expect(messages.map((m) => (m.text, m.outgoing, m.status)), [
+        ('hi', false, MessageStatus.sent),
+        ('reply', true, MessageStatus.sent),
+      ]);
+      expect(messages.last.id, reply.id);
+      expect(restarted.unreadCountFor('AA:AA'), 1);
+    });
+
+    test('a message still being sent when the app stopped comes back as '
+        'failed', () async {
+      registerNativeHandler();
+      final first = BleAppController();
+      await first.initialize();
+      await first.sendMessage('AA:AA', 'in flight');
+      await pumpEventQueue();
+
+      final restarted = BleAppController();
+      await restarted.initialize();
+
+      final message = restarted.messagesByDevice['AA:AA']!.single;
+      expect(message.status, MessageStatus.failed);
+      expect(message.statusLabel, contains('전송 결과를 알 수 없습니다'));
+    });
+
+    test('keeps only the newest messages per device', () async {
+      registerNativeHandler();
+      final first = BleAppController();
+      await first.initialize();
+      for (var i = 0; i < 205; i++) {
+        await incoming('AA:AA', 'm$i');
+      }
+      await pumpEventQueue();
+
+      final restarted = BleAppController();
+      await restarted.initialize();
+
+      final texts = restarted.messagesByDevice['AA:AA']!.map((m) => m.text);
+      expect(texts.length, 200);
+      expect(texts.first, 'm5');
+      expect(texts.last, 'm204');
+    });
+
+    test('deleting a device also deletes its stored messages', () async {
+      registerNativeHandler();
+      final first = BleAppController();
+      await first.initialize();
+      await incoming('AA:AA', 'hi');
+      await first.removeDevice('AA:AA');
+      await pumpEventQueue();
+
+      final restarted = BleAppController();
+      await restarted.initialize();
+
+      expect(restarted.messagesByDevice['AA:AA'], isNull);
+      expect(restarted.unreadCountFor('AA:AA'), 0);
+    });
+  });
+
   group('removeDevice', () {
     test('forgets the device, persists it, and disconnects it natively', () async {
       registerNativeHandler();

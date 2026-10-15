@@ -105,7 +105,11 @@
 - 발견된 기기 이름을 `peripheral.name`에서만 읽습니다. Android는 이름을 scan response에 넣으므로 `CBAdvertisementDataLocalNameKey`를 먼저 읽어야 합니다.
 - `sendMessage`가 `maximumWriteValueLength(for:)`를 확인하지 않습니다.
 
-### 11. 앱 화면이 없을 때 받은 메시지가 사라짐 `코드`
+### 11. 앱 화면이 없을 때 받은 메시지가 사라짐 `확인됨` ✅ 해결 (iOS 알림 제외)
+- 확인: Jump3 앱 화면을 닫은 상태에서 iPhone이 보낸 메시지는 iPhone에 Sent로 표시됐지만, 앱을 다시 열면 없었습니다. 원인은 Activity가 종료될 때 EventChannel의 `onCancel`이 호출되지 않아, 죽은 엔진의 sink로 이벤트를 보내고 있었던 것입니다. 앱을 재시작하면 메시지 기록도 모두 사라졌습니다.
+- 해결: sink를 `cleanUpFlutterEngine`에서 해제합니다. sink가 없을 때 받은 메시지는 디스크(`PendingMessageStore`)에 보관했다가 다시 연결되면 먼저 전달합니다(iOS도 UserDefaults로 같은 처리). 앱이 포그라운드가 아닐 때 받은 메시지는 Android에서 알림으로 띄우고, 메시지 기록과 안 읽음 수는 Dart에서 저장합니다.
+- 확인(수정 후, Jump3): 화면을 닫은 동안 받은 메시지가 다시 열면 원래 받은 시각과 함께 표시됐습니다. 백그라운드일 때는 `AlgorigoSE: hello from central` 알림이 뜨고, 탭하면 앱이 열리며 알림이 지워졌습니다. 강제 종료 후 재실행해도 메시지 기록이 남아 있었습니다.
+- 남은 것: iOS에서 메시지 알림(알림 권한 흐름 필요), iOS 보관 동작을 기기에서 확인하는 일(상태 복원으로 앱이 다시 실행되는 상황을 만들기 어려움).
 - `BleEventBus`는 Flutter listener가 없으면 이벤트를 버립니다. 메시지 기록도 Dart 메모리에만 있습니다.
 - Android에서는 루트 화면에서 뒤로 가기로 Activity가 종료된 동안 받은 메시지가 사라집니다(확인됨). iOS도 엔진이 없으면 같은 문제가 생깁니다.
 - 메시지를 받아도 사용자 알림이 뜨지 않습니다. `POST_NOTIFICATIONS` 권한은 포그라운드 서비스 알림에만 쓰고 있습니다.
