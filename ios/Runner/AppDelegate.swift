@@ -108,6 +108,11 @@ final class IOSBleBackgroundManager: NSObject, FlutterStreamHandler {
   private var connectedPeripheralIds: Set<UUID> = []
   // Links that were up when Bluetooth powered off; reconnected once it's back on.
   private var peripheralsToReconnect: Set<UUID> = []
+  // connectDevice calls made before the central manager was powered on (e.g. Dart
+  // reconnecting saved devices right after launch); issued once it is.
+  private var pendingConnectIds: Set<UUID> = []
+  // Subscription retries per peripheral while pairing is in progress.
+  private var subscribeAttempts: [UUID: Int] = [:]
   private var advertisingEnabled = false
   private var centralEnabled = false
 
@@ -173,12 +178,22 @@ final class IOSBleBackgroundManager: NSObject, FlutterStreamHandler {
   }
 
   func connectDevice(_ deviceId: String?) {
-    guard
-      let deviceId,
-      let uuid = UUID(uuidString: deviceId),
-      let peripheral = peripherals[uuid]
-    else { return }
+    guard let deviceId, let uuid = UUID(uuidString: deviceId) else { return }
     forgottenPeripherals.remove(uuid)
+    guard centralManager.state == .poweredOn else {
+      pendingConnectIds.insert(uuid)
+      return
+    }
+    // After a relaunch a saved device isn't in `peripherals` until it's scanned
+    // again, but CoreBluetooth can still hand it out by identifier.
+    guard let peripheral = peripherals[uuid]
+      ?? centralManager.retrievePeripherals(withIdentifiers: [uuid]).first
+    else {
+      emit(type: "error", payload: ["message": "Unknown device \(deviceId)"])
+      return
+    }
+    peripherals[uuid] = peripheral
+    guard peripheral.state == .disconnected else { return }
     centralManager.connect(peripheral, options: nil)
   }
 
@@ -356,6 +371,14 @@ extension IOSBleBackgroundManager: CBCentralManagerDelegate {
           .forEach { central.connect($0, options: nil) }
       }
       peripheralsToReconnect.removeAll()
+      let pending = pendingConnectIds
+      pendingConnectIds.removeAll()
+      pending.forEach { connectDevice($0.uuidString) }
+      // Links restored by state restoration lost their characteristic reference
+      // with the old process; look it up again.
+      peripherals.values
+        .filter { $0.state == .connected && writableCharacteristics[$0.identifier] == nil }
+        .forEach { $0.discoverServices([serviceUUID]) }
     case .poweredOff:
       // CoreBluetooth drops every link without calling didDisconnectPeripheral.
       peripheralsToReconnect = connectedPeripheralIds.subtracting(forgottenPeripherals)
@@ -374,7 +397,27 @@ extension IOSBleBackgroundManager: CBCentralManagerDelegate {
     _ central: CBCentralManager,
     willRestoreState dict: [String: Any]
   ) {
+    // Commands have to wait for poweredOn; centralManagerDidUpdateState resumes these.
+    let restored = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral] ?? []
+    for peripheral in restored {
+      peripheral.delegate = self
+      peripherals[peripheral.identifier] = peripheral
+      if peripheral.state == .connected {
+        connectedPeripheralIds.insert(peripheral.identifier)
+      }
+    }
     emit(type: "status", payload: ["status": "central-restored"])
+  }
+
+  func centralManager(
+    _ central: CBCentralManager,
+    didFailToConnect peripheral: CBPeripheral,
+    error: Error?
+  ) {
+    emit(type: "error", payload: [
+      "message": "Connection to \(peripheral.identifier.uuidString) failed: \(error?.localizedDescription ?? "unknown error")"
+    ])
+    emitDisconnectedIfUnlinked(peripheral.identifier)
   }
 
   func centralManager(
@@ -384,17 +427,22 @@ extension IOSBleBackgroundManager: CBCentralManagerDelegate {
     rssi RSSI: NSNumber
   ) {
     peripherals[peripheral.identifier] = peripheral
+    // Android puts its name in the scan response; peripheral.name is only the cached
+    // GAP name, which a peer that was never connected doesn't have yet.
+    let name = advertisementData[CBAdvertisementDataLocalNameKey] as? String ?? peripheral.name ?? ""
     emit(type: "discovered", payload: [
       "deviceId": peripheral.identifier.uuidString,
-      "name": peripheral.name ?? ""
+      "name": name
     ])
   }
 
   func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
     connectedPeripheralIds.insert(peripheral.identifier)
+    subscribeAttempts.removeValue(forKey: peripheral.identifier)
     peripheral.delegate = self
+    // `connected` is reported once the subscription succeeds: until then (service
+    // discovery, pairing) messages can't be exchanged yet.
     peripheral.discoverServices([serviceUUID])
-    emit(type: "connected", payload: ["deviceId": peripheral.identifier.uuidString])
   }
 
   func centralManager(
@@ -540,6 +588,39 @@ extension IOSBleBackgroundManager: CBPeripheralDelegate {
       writableCharacteristics[peripheral.identifier] = characteristic
       peripheral.setNotifyValue(true, for: characteristic)
     }
+  }
+
+  func peripheral(
+    _ peripheral: CBPeripheral,
+    didUpdateNotificationStateFor characteristic: CBCharacteristic,
+    error: Error?
+  ) {
+    guard characteristic.uuid == messageCharacteristicUUID else { return }
+    let id = peripheral.identifier
+    guard let error else {
+      subscribeAttempts.removeValue(forKey: id)
+      emit(type: "connected", payload: ["deviceId": id.uuidString])
+      return
+    }
+    // The peer requires an encrypted link. The first attempt makes iOS start pairing
+    // but fails itself, and CoreBluetooth doesn't retry it, so retry until pairing is
+    // done (the system dialog times out after about 30 s).
+    let code = (error as? CBATTError)?.code
+    let attempts = subscribeAttempts[id, default: 0] + 1
+    if code == .insufficientAuthentication || code == .insufficientEncryption, attempts <= 30 {
+      subscribeAttempts[id] = attempts
+      DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+        guard let self, peripheral.state == .connected,
+          let current = self.writableCharacteristics[id]
+        else { return }
+        peripheral.setNotifyValue(true, for: current)
+      }
+      return
+    }
+    subscribeAttempts.removeValue(forKey: id)
+    emit(type: "error", payload: [
+      "message": "Subscribing to \(id.uuidString) failed: \(error.localizedDescription)"
+    ])
   }
 
   func peripheral(

@@ -94,7 +94,10 @@
   - characteristic과 CCCD를 `PERMISSION_WRITE_ENCRYPTED`/`PERMISSION_*_ENCRYPTED`로 바꿉니다. 그러면 iOS가 자동으로 페어링 팝업을 띄웁니다.
   - 페어링된 Android central은 기존 키로 암호화된 연결을 만드는지 다시 테스트해야 합니다.
 
-### 10. iOS central의 연결과 복원 처리가 불완전함 `코드`
+### 10. iOS central의 연결과 복원 처리가 불완전함 `확인됨` ✅ 해결
+- 확인: 앱을 재시작하면 등록된 Jump3에 다시 연결되지 않았습니다(이전 코드, 상대의 central을 끈 상태). 또 Jump3가 9번으로 암호화를 요구하자, 페어링 전인 iPhone의 첫 요청이 `Authentication is insufficient`로 실패했습니다. iOS는 이때 페어링을 시작하지만 실패한 요청을 다시 보내지 않습니다.
+- 해결: `connectDevice`가 `retrievePeripherals(withIdentifiers:)`를 쓰고, 전원이 켜지기 전 요청은 보관했다가 연결합니다. 상태 복원으로 받은 peripheral을 다시 등록하고, `didFailToConnect` 오류를 보고하고, 광고의 local name을 우선 읽습니다. 구독이 인증·암호화 오류로 실패하면 2초 간격으로 다시 시도하고, `connected`는 구독이 성공한 뒤에 보냅니다.
+- 확인(수정 후): AlgorigoSE(central) ↔ Jump3(peripheral)에서 이름으로 찾기, 페어링, 연결, 양방향 메시지(`hello from central` / `4321`)가 모두 됐고, 앱을 재시작하면 Jump3에 자동으로 다시 연결됐습니다. 테스트: `integration_test/central_connect_test.dart`. 이름이 비어 보이는 문제는 이번 iOS 버전에서는 재현되지 않았습니다.
 - `connectDevice`가 이번 실행 중에 발견된 기기(`peripherals`)만 찾습니다. 그래서 앱 시작 시 저장된 기기에 연결하는 동작이 아무 일도 하지 않습니다.
   - 수정: `retrievePeripherals(withIdentifiers:)`를 사용합니다.
 - `willRestoreState`가 `CBCentralManagerRestoredStatePeripheralsKey`를 처리하지 않습니다. 그래서 백그라운드에서 복원되면 연결 참조를 잃습니다.
