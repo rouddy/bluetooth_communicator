@@ -77,6 +77,8 @@ void main() {
     debugPrint('IT_STEP received: ${(receivedTile.title! as Text).data}');
 
     await tester.enterText(find.byType(TextField), replyText);
+    // The send button is enabled by the next frame.
+    await tester.pump();
     await tester.tap(find.byIcon(Icons.send));
     await pumpUntilFound(tester, find.textContaining('Sent'));
     debugPrint('IT_STEP sent');

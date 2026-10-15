@@ -17,6 +17,11 @@ const String _prefsRegisteredDevices = 'prefs_registered_devices';
 const String _prefsMessages = 'prefs_messages';
 const String _prefsUnreadCounts = 'prefs_unread_counts';
 
+/// Longest message, in UTF-8 bytes, that can be sent: a GATT attribute value holds
+/// at most 512 bytes. Notifications are further limited by the link's MTU (514
+/// bytes with the 517 MTU the app negotiates); native code rejects those.
+const int maxMessageBytes = 512;
+
 /// Messages kept per device in [_prefsMessages]; older ones are dropped.
 const int _storedMessagesPerDevice = 200;
 
@@ -546,33 +551,46 @@ class _DeviceControlPageState extends State<DeviceControlPage>
             top: false,
             child: Padding(
               padding: const EdgeInsets.all(12),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: TextField(
-                      controller: _textController,
-                      decoration: const InputDecoration(
-                        border: OutlineInputBorder(),
-                        hintText: '메시지 입력',
+              child: ValueListenableBuilder<TextEditingValue>(
+                valueListenable: _textController,
+                builder: (context, value, _) {
+                  final text = value.text.trim();
+                  final bytes = utf8.encode(text).length;
+                  final tooLong = bytes > maxMessageBytes;
+                  return Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: _textController,
+                          decoration: InputDecoration(
+                            border: const OutlineInputBorder(),
+                            hintText: '메시지 입력',
+                            // Shown close to the limit, so it doesn't come as a surprise.
+                            counterText: bytes > maxMessageBytes * 0.8
+                                ? '$bytes/$maxMessageBytes bytes'
+                                : null,
+                            errorText: tooLong ? '메시지가 너무 깁니다' : null,
+                          ),
+                        ),
                       ),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  IconButton.filled(
-                    onPressed: () async {
-                      final text = _textController.text.trim();
-                      if (text.isEmpty) {
-                        return;
-                      }
-                      _textController.clear();
-                      await widget.controller.sendMessage(
-                        widget.device.identifier,
-                        text,
-                      );
-                    },
-                    icon: const Icon(Icons.send),
-                  ),
-                ],
+                      const SizedBox(width: 8),
+                      IconButton.filled(
+                        onPressed: text.isEmpty || tooLong
+                            ? null
+                            : () async {
+                                final message = _textController.text.trim();
+                                _textController.clear();
+                                await widget.controller.sendMessage(
+                                  widget.device.identifier,
+                                  message,
+                                );
+                              },
+                        icon: const Icon(Icons.send),
+                      ),
+                    ],
+                  );
+                },
               ),
             ),
           ),

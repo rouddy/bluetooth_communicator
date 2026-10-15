@@ -94,6 +94,8 @@ void main() {
     debugPrint('IT_STEP sending');
     for (var i = 1; i <= count; i++) {
       await tester.enterText(find.byType(TextField), burstText(i));
+      // The send button is enabled by the next frame.
+      await tester.pump();
       await tester.tap(find.byIcon(Icons.send));
       // One frame only: the sends must overlap on the native side.
       await tester.pump();

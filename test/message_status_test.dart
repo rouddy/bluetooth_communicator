@@ -49,6 +49,8 @@ void main() {
 
     Future<void> send(String text) async {
       await tester.enterText(find.byType(TextField), text);
+      // The send button is enabled by the next frame.
+      await tester.pump();
       await tester.tap(find.byIcon(Icons.send));
       await tester.pump();
     }

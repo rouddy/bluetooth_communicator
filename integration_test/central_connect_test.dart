@@ -91,6 +91,8 @@ void main() {
     // The first write may be held up by pairing (the peer requires an
     // encrypted link); it has to end up Sent rather than fail.
     await tester.enterText(find.byType(TextField), fromCentralText);
+    // The send button is enabled by the next frame.
+    await tester.pump();
     await tester.tap(find.byIcon(Icons.send));
     await pumpUntilGone(
       tester,
