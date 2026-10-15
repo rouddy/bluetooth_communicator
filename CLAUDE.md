@@ -23,10 +23,11 @@ This is a Flutter app for exchanging text messages between phones over BLE. Ever
 
 ### Platform channel contract (keep all three sides in sync)
 
-- **MethodChannel** `com.rouddy.bluetooth_communicator/bluetooth_control`. Methods: `initialize`, `setAdvertisingEnabled{enabled}`, `setCentralEnabled{enabled}`, `scanNow`, `connectDevice{deviceId, pair}`, `sendMessage{deviceId, message}`.
+- **MethodChannel** `com.rouddy.bluetooth_communicator/bluetooth_control`. Methods: `initialize`, `setAdvertisingEnabled{enabled}`, `setCentralEnabled{enabled}`, `scanNow`, `connectDevice{deviceId, pair}`, `disconnectDevice{deviceId}`, `sendMessage{deviceId, message}`.
 - **EventChannel** `com.rouddy.bluetooth_communicator/bluetooth_events`. Each event is a flat map with a `type` key: `status{status}`, `discovered{deviceId, name}`, `connected{deviceId}`, `disconnected{deviceId}`, `message{deviceId, message}`, `error{message}`.
 - Shared GATT UUIDs are hard-coded on both native sides. Service `1F9ED31D-B738-4D4C-A6D8-86DBF0F9C001`, message characteristic `DB912050-2E4E-4C4E-A543-E89121E57595`. Messages are sent as raw UTF-8 bytes.
 - `initialize` returns `true` once it has started the background service, or `false` if the Bluetooth permissions are missing. Runtime permissions aren't part of the channel contract: Dart requests them with `permission_handler` before calling `initialize`.
+- `disconnectDevice` drops every link to the device and cancels a pending connect. On Android that's the client link, the server link, and a pending `connectGatt`. On iOS it's the client link only, because CoreBluetooth can't drop a central that's connected to our service. Dart calls it when a registered device is deleted (`BleAppController.removeDevice`), after the registered list has been saved, because the Android service reads that list to decide whether to reconnect.
 - `pair` is true only for user-initiated connects (the 연결 button). Android then bonds unbonded devices first via `createBond()`, which shows the system pairing dialog. Without it, Android connects only to already-bonded devices, so replaying saved devices on launch never prompts. iOS ignores it.
 - `deviceId` is the MAC address on Android and the `CBPeripheral.identifier` UUID string on iOS. These IDs are not portable between platforms.
 

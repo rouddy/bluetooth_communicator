@@ -336,6 +336,37 @@ class _DeviceControlPageState extends State<DeviceControlPage> {
     super.dispose();
   }
 
+  Future<void> _confirmRemove() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('기기 삭제'),
+        content: const Text(
+          '연결 기록과 메시지를 삭제하고 연결을 끊습니다. '
+          '페어링 정보는 시스템 Bluetooth 설정에서 따로 해제해야 합니다.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('취소'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('삭제'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) {
+      return;
+    }
+    await widget.controller.removeDevice(widget.device.identifier);
+    if (!mounted) {
+      return;
+    }
+    Navigator.of(context).pop();
+  }
+
   @override
   Widget build(BuildContext context) {
     final isConnected = widget.controller.connectedDeviceIds.contains(
@@ -347,6 +378,14 @@ class _DeviceControlPageState extends State<DeviceControlPage> {
     return Scaffold(
       appBar: AppBar(
         title: Text(widget.device.name.isEmpty ? widget.device.identifier : widget.device.name),
+        actions: [
+          if (widget.controller.isKnownDevice(widget.device.identifier))
+            IconButton(
+              tooltip: '기기 삭제',
+              icon: const Icon(Icons.delete_outline),
+              onPressed: _confirmRemove,
+            ),
+        ],
       ),
       body: Column(
         children: [
@@ -615,6 +654,28 @@ class BleAppController extends ChangeNotifier {
   /// the device isn't bonded yet. Only pass it for user-initiated connects.
   Future<void> connectDevice(String deviceId, {bool pair = false}) async {
     await _invoke('connectDevice', {'deviceId': deviceId, 'pair': pair});
+  }
+
+  /// Whether [deviceId] is registered or currently connected, i.e. listed under
+  /// 연결 기록 and removable.
+  bool isKnownDevice(String deviceId) =>
+      connectedDeviceIds.contains(deviceId) ||
+      registeredDevices.any((d) => d.identifier == deviceId);
+
+  /// Forgets a device: it leaves the registered list (so it's no longer
+  /// connected automatically), its messages are cleared, and any live link is
+  /// dropped. An OS-level pairing stays; only the system Bluetooth settings can
+  /// remove it. If the peer connects to us again, it gets registered again.
+  Future<void> removeDevice(String deviceId) async {
+    registeredDevices.removeWhere((d) => d.identifier == deviceId);
+    connectedDeviceIds.remove(deviceId);
+    messagesByDevice.remove(deviceId);
+    unreadCountByDevice.remove(deviceId);
+    // Save before disconnecting: the Android service reads this list to decide
+    // whether to reconnect a dropped device.
+    await _saveRegisteredDevices();
+    notifyListeners();
+    await _invoke('disconnectDevice', {'deviceId': deviceId});
   }
 
   Future<void> registerDevice(BleDevice device) async {

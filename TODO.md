@@ -49,7 +49,8 @@
 
 ## P1: 기능 오류, 데이터 유실
 
-### 5. 등록된 기기를 삭제하는 UI가 없음 `확인됨`
+### 5. 등록된 기기를 삭제하는 UI가 없음 `확인됨` ✅ 해결
+- 해결: 기기 화면의 삭제 버튼(확인 팝업 포함)을 누르면 등록 목록, 메시지, 안 읽음 카운트에서 지우고 `disconnectDevice`로 연결을 끊습니다. Android는 대기 중인 `connectGatt`도 취소합니다(central OFF 시에도 남던 문제 포함). 테스트: `test/device_removal_test.dart`, controller의 `removeDevice` 테스트. S23에서 연결 중인 기기를 삭제하면 연결이 끊기고(`connected:2` → `1`), 30초 뒤와 앱 재시작 후에도 다시 연결되지 않는 것을 확인했습니다. iOS의 `disconnectDevice`(central 역할)는 기기에서 확인하지 못했습니다.
 - createBond를 도입하기 전에 랜덤 주소로 저장된 항목(`재홍의 S23 41:88…`, `(Unknown)` 등)이 목록에 계속 남아 있습니다.
 - 수정 방향
   - 기기 화면이나 목록에 삭제 기능을 넣습니다. 삭제하면 `registeredDevices`, 메시지, 안 읽음 카운트를 함께 지웁니다.

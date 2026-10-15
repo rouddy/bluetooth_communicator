@@ -126,6 +126,45 @@ void main() {
     });
   });
 
+  group('removeDevice', () {
+    test('forgets the device, persists it, and disconnects it natively', () async {
+      registerNativeHandler();
+      SharedPreferences.setMockInitialValues({
+        'prefs_registered_devices':
+            '[{"identifier":"AA:AA","name":"keep"},'
+            '{"identifier":"BB:BB","name":"remove"}]',
+      });
+      final controller = BleAppController();
+      await controller.initialize();
+      final events = <Map<String, dynamic>>[
+        {'type': 'connected', 'deviceId': 'BB:BB'},
+        {'type': 'message', 'deviceId': 'BB:BB', 'message': 'hi'},
+      ];
+      for (final event in events) {
+        await messenger.handlePlatformMessage(
+          _eventsChannel.name,
+          const StandardMethodCodec().encodeSuccessEnvelope(event),
+          (_) {},
+        );
+      }
+      expect(controller.isKnownDevice('BB:BB'), isTrue);
+      expect(controller.unreadCountFor('BB:BB'), 1);
+      nativeCalls.clear();
+
+      await controller.removeDevice('BB:BB');
+
+      expect(controller.isKnownDevice('BB:BB'), isFalse);
+      expect(controller.allKnownDevices.map((d) => d.identifier), ['AA:AA']);
+      expect(controller.messagesByDevice['BB:BB'], isNull);
+      expect(controller.unreadCountFor('BB:BB'), 0);
+      expect(nativeCalls.single.method, 'disconnectDevice');
+      expect(nativeCalls.single.arguments, {'deviceId': 'BB:BB'});
+      // The Android service reads this list to decide what to reconnect.
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getString('prefs_registered_devices'), isNot(contains('BB:BB')));
+    });
+  });
+
   group('initialize re-entrancy', () {
     test('a second call while the first is still running is ignored', () async {
       registerNativeHandler();

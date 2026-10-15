@@ -64,6 +64,13 @@ class MainActivity : FlutterActivity() {
                         )
                         result.success(null)
                     }
+                    "disconnectDevice" -> {
+                        startServiceAction(
+                            BluetoothBackgroundService.ACTION_DISCONNECT_DEVICE,
+                            call.argument<String>("deviceId")
+                        )
+                        result.success(null)
+                    }
                     "sendMessage" -> {
                         val deviceId = call.argument<String>("deviceId")
                         val message = call.argument<String>("message")

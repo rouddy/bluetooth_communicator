@@ -55,6 +55,10 @@ import UIKit
         let deviceId = args?["deviceId"] as? String
         self.bleManager.connectDevice(deviceId)
         result(nil)
+      case "disconnectDevice":
+        let args = call.arguments as? [String: Any]
+        self.bleManager.disconnectDevice(args?["deviceId"] as? String)
+        result(nil)
       case "sendMessage":
         let args = call.arguments as? [String: Any]
         let deviceId = args?["deviceId"] as? String
@@ -97,6 +101,9 @@ final class IOSBleBackgroundManager: NSObject, FlutterStreamHandler {
   private var eventSink: FlutterEventSink?
   private var peripherals: [UUID: CBPeripheral] = [:]
   private var writableCharacteristics: [UUID: CBCharacteristic] = [:]
+  // Peripherals the user disconnected on purpose; didDisconnectPeripheral must not
+  // reconnect them until they're connected again explicitly.
+  private var forgottenPeripherals: Set<UUID> = []
   private var advertisingEnabled = false
   private var centralEnabled = false
 
@@ -164,7 +171,19 @@ final class IOSBleBackgroundManager: NSObject, FlutterStreamHandler {
       let uuid = UUID(uuidString: deviceId),
       let peripheral = peripherals[uuid]
     else { return }
+    forgottenPeripherals.remove(uuid)
     centralManager.connect(peripheral, options: nil)
+  }
+
+  func disconnectDevice(_ deviceId: String?) {
+    guard let deviceId, let uuid = UUID(uuidString: deviceId) else { return }
+    if let peripheral = peripherals[uuid] {
+      forgottenPeripherals.insert(uuid)
+      writableCharacteristics.removeValue(forKey: uuid)
+      centralManager.cancelPeripheralConnection(peripheral)
+    }
+    // CoreBluetooth can't drop a central connected to our service: it stays
+    // subscribed until the remote side disconnects.
   }
 
   func sendMessage(deviceId: String?, message: String?) {
@@ -324,7 +343,7 @@ extension IOSBleBackgroundManager: CBCentralManagerDelegate {
   ) {
     writableCharacteristics.removeValue(forKey: peripheral.identifier)
     emitDisconnectedIfUnlinked(peripheral.identifier)
-    if centralEnabled {
+    if centralEnabled && !forgottenPeripherals.contains(peripheral.identifier) {
       central.connect(peripheral, options: nil)
     }
   }

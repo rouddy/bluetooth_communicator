@@ -56,7 +56,9 @@ class BluetoothBackgroundService : Service() {
 
     private val activeConnections = ConcurrentHashMap<String, BluetoothGatt>()
     private val writableCharacteristics = ConcurrentHashMap<String, BluetoothGattCharacteristic>()
-    private val connectingAddresses = ConcurrentHashMap.newKeySet<String>()
+    // connectGatt() calls that haven't connected yet, kept so they can be cancelled. A
+    // pending autoConnect would otherwise complete whenever the device shows up again.
+    private val pendingConnections = ConcurrentHashMap<String, BluetoothGatt>()
     private val pendingBondAddresses = ConcurrentHashMap.newKeySet<String>()
 
     @Volatile
@@ -144,6 +146,7 @@ class BluetoothBackgroundService : Service() {
                 intent.getStringExtra(EXTRA_DEVICE_ID),
                 intent.getBooleanExtra(EXTRA_PAIR, false)
             )
+            ACTION_DISCONNECT_DEVICE -> disconnectDevice(intent.getStringExtra(EXTRA_DEVICE_ID))
             ACTION_SEND_MESSAGE -> {
                 val deviceId = intent.getStringExtra(EXTRA_DEVICE_ID)
                 val message = intent.getStringExtra(EXTRA_MESSAGE)
@@ -366,23 +369,50 @@ class BluetoothBackgroundService : Service() {
     @SuppressLint("MissingPermission")
     private fun connectGattIfNeeded(device: BluetoothDevice) {
         val address = device.address ?: return
-        if (activeConnections.containsKey(address) || connectingAddresses.contains(address)) {
+        if (activeConnections.containsKey(address) || pendingConnections.containsKey(address)) {
             return
         }
-        connectingAddresses.add(address)
         // Background (autoConnect) connections only work with identity addresses.
         // Unbonded peers advertise with a resolvable private address, which the stack
         // rejects for background connect (status 133/135), so connect directly instead.
         val autoConnect = device.bondState == BluetoothDevice.BOND_BONDED
-        device.connectGatt(this, autoConnect, gattCallback, BluetoothDevice.TRANSPORT_LE)
+        val gatt = device.connectGatt(this, autoConnect, gattCallback, BluetoothDevice.TRANSPORT_LE)
+            ?: return
+        pendingConnections[address] = gatt
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun disconnectDevice(deviceId: String?) {
+        if (deviceId.isNullOrBlank()) {
+            return
+        }
+        pendingBondAddresses.remove(deviceId)
+        writableCharacteristics.remove(deviceId)
+        listOfNotNull(pendingConnections.remove(deviceId), activeConnections.remove(deviceId))
+            .forEach { gatt ->
+                runCatching {
+                    gatt.disconnect()
+                    gatt.close()
+                }
+            }
+        subscribedCentrals.remove(deviceId)?.let { central ->
+            centralMtus.remove(deviceId)
+            preparedWrites.remove(deviceId)
+            runCatching { gattServer?.cancelConnection(central) }
+        }
+        // close() unregisters the client callback, so onConnectionStateChange won't report this.
+        emitDisconnectedIfUnlinked(deviceId)
+        emitStatus()
     }
 
     @SuppressLint("MissingPermission")
     private fun disconnectAll() {
         val entries = activeConnections.values.toList()
+        val pending = pendingConnections.values.toList()
         activeConnections.clear()
+        pendingConnections.clear()
         writableCharacteristics.clear()
-        connectingAddresses.clear()
+        pending.forEach { runCatching { it.close() } }
         entries.forEach {
             runCatching {
                 it.disconnect()
@@ -598,7 +628,7 @@ class BluetoothBackgroundService : Service() {
             val address = gatt.device.address ?: return
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
-                    connectingAddresses.remove(address)
+                    pendingConnections.remove(address)
                     activeConnections[address] = gatt
                     // The default MTU leaves 20 bytes per packet (6 Korean characters), and
                     // the peer's notifications can't be split, so negotiate a larger MTU
@@ -614,7 +644,7 @@ class BluetoothBackgroundService : Service() {
                     )
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
-                    connectingAddresses.remove(address)
+                    pendingConnections.remove(address)
                     val wasConnected = activeConnections.remove(address) != null
                     writableCharacteristics.remove(address)
                     runCatching { gatt.close() }
@@ -855,6 +885,7 @@ class BluetoothBackgroundService : Service() {
         const val ACTION_SCAN_NOW = "ble.action.SCAN_NOW"
         const val ACTION_CONNECT_DEVICE = "ble.action.CONNECT_DEVICE"
         const val ACTION_SEND_MESSAGE = "ble.action.SEND_MESSAGE"
+        const val ACTION_DISCONNECT_DEVICE = "ble.action.DISCONNECT_DEVICE"
 
         const val EXTRA_DEVICE_ID = "extra.device.id"
         const val EXTRA_MESSAGE = "extra.message"
