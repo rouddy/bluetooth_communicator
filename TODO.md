@@ -63,7 +63,9 @@
 - 그 결과 알림은 계속 떠 있는데 광고, 스캔, 재연결은 하나도 동작하지 않습니다.
 - 수정 방향: `intent == null`이면 `ACTION_RESTORE`처럼 처리합니다.
 
-### 7. Bluetooth를 껐다 켜는 경우를 처리하지 않음 `코드`
+### 7. Bluetooth를 껐다 켜는 경우를 처리하지 않음 `확인됨` ✅ 해결
+- 확인: S23에서 Bluetooth를 껐다 켜자, 수정 전에는 상태가 `advertising scanning connected:1` 그대로인데 실제로는 스캐너도 광고도 없었습니다.
+- 해결: `ACTION_STATE_CHANGED`를 받아 꺼지면 상태와 연결을 정리하고 `bluetooth-off` 상태와 `disconnected`를 보내고, 켜지면 저장된 상태를 복원합니다. 홈 화면에는 꺼져 있다는 배너를 표시합니다. 광고는 시작할 때마다 새 `AdvertiseCallback`을 써야 다시 켤 때 `ALREADY_STARTED`(3)로 실패하지 않습니다. iOS도 전원이 꺼지면 연결을 끊김으로 보고하고, 켜지면 다시 연결합니다(iOS는 기기에서 확인하지 못함). 테스트: `test/bluetooth_state_test.dart`. S23에서 끄면 배너가 뜨고 연결이 끊김으로 바뀌며, 켜면 광고·스캔·연결이 모두 복원되는 것을 확인했습니다.
 - `BluetoothAdapter.ACTION_STATE_CHANGED`를 받지 않습니다.
 - BT를 끄면 `isAdvertising`, `isScanning`, `gattServer` 상태가 실제와 어긋나고, 다시 켜도 아무것도 재시작되지 않습니다. 앱이나 서비스를 다시 시작해야 복구됩니다.
 - 수정 방향
@@ -143,7 +145,8 @@
 - Dart 입력창에는 길이 제한이 없어서 긴 메시지는 실패하거나 오류만 납니다.
 - 수정 방향: 입력 단계에서 UTF-8 바이트 수를 제한하거나, 프로토콜 차원에서 분할 전송합니다(23번 참고).
 
-### 18. 광고 시작이 겹칠 수 있음 `확인됨`
+### 18. 광고 시작이 겹칠 수 있음 `확인됨` ✅ 해결 (7번과 함께)
+- 해결: 시작 요청부터 `advertiseCallback`이 설정되므로, 대기 중인 요청이 있으면 두 번째 시작은 무시합니다. S23에서 앱을 실행한 뒤 `Advertising failed: 3`이 더는 나오지 않고, 광고도 하나만 있는 것을 확인했습니다.
 - S23에서 권한을 허용한 직후 설정 화면에 `Advertising failed: 3`(`ALREADY_STARTED`)이 표시되는 것을 확인했습니다.
 - Dart `initialize()`는 `ACTION_RESTORE`(광고 시작)와 `ACTION_START_ADVERTISING`을 연달아 보냅니다.
 - `isAdvertising`은 `onStartSuccess`가 와야 true가 되므로, 두 번째 시작이 `ADVERTISE_FAILED_ALREADY_STARTED`로 실패할 수 있습니다.

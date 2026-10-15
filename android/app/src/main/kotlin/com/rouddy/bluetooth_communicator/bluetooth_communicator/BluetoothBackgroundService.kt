@@ -95,6 +95,12 @@ class BluetoothBackgroundService : Service() {
             // receivers never get it.
             ContextCompat.RECEIVER_EXPORTED
         )
+        ContextCompat.registerReceiver(
+            this,
+            adapterStateReceiver,
+            IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED),
+            ContextCompat.RECEIVER_EXPORTED
+        )
     }
 
     private fun startForegroundSafely() {
@@ -171,6 +177,7 @@ class BluetoothBackgroundService : Service() {
         stopScan()
         disconnectAll()
         runCatching { unregisterReceiver(bondStateReceiver) }
+        runCatching { unregisterReceiver(adapterStateReceiver) }
         super.onDestroy()
     }
 
@@ -232,7 +239,10 @@ class BluetoothBackgroundService : Service() {
 
     @SuppressLint("MissingPermission")
     private fun startAdvertising() {
-        if (!hasBlePermissions() || isAdvertising) {
+        // advertiseCallback is set from the start request on, so a second request while
+        // the first is still pending (e.g. ACTION_RESTORE followed by
+        // ACTION_START_ADVERTISING) doesn't start a second, unstoppable advertising set.
+        if (!hasBlePermissions() || advertiseCallback != null) {
             return
         }
         val bleAdvertiser = advertiser ?: return
@@ -259,12 +269,15 @@ class BluetoothBackgroundService : Service() {
         val scanResponse = AdvertiseData.Builder()
             .setIncludeDeviceName(advertiseDeviceName)
             .build()
-        bleAdvertiser.startAdvertising(settings, data, scanResponse, advertiseCallback)
+        val callback = newAdvertiseCallback()
+        advertiseCallback = callback
+        bleAdvertiser.startAdvertising(settings, data, scanResponse, callback)
     }
 
     @SuppressLint("MissingPermission")
     private fun stopAdvertising() {
-        advertiser?.stopAdvertising(advertiseCallback)
+        advertiseCallback?.let { advertiser?.stopAdvertising(it) }
+        advertiseCallback = null
         isAdvertising = false
         closeGattServer()
     }
@@ -510,6 +523,7 @@ class BluetoothBackgroundService : Service() {
     private fun emitStatus() {
         val connectionCount = (activeConnections.keys + subscribedCentrals.keys).size
         val status = when {
+            adapter?.state != BluetoothAdapter.STATE_ON -> STATUS_BLUETOOTH_OFF
             connectionCount > 0 -> {
                 buildString {
                     if (isAdvertising) {
@@ -577,19 +591,32 @@ class BluetoothBackgroundService : Service() {
         }
     }
 
-    private val advertiseCallback = object : AdvertiseCallback() {
+    // A new callback per start: after Bluetooth power-cycles, the framework still holds
+    // the previous callback (it can't be stopped while the adapter is off), and starting
+    // with it again fails with ADVERTISE_FAILED_ALREADY_STARTED.
+    private var advertiseCallback: AdvertiseCallback? = null
+
+    private fun newAdvertiseCallback() = object : AdvertiseCallback() {
         override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
+            if (this !== advertiseCallback) {
+                return
+            }
             isAdvertising = true
             emitStatus()
         }
 
         override fun onStartFailure(errorCode: Int) {
+            if (this !== advertiseCallback) {
+                return
+            }
             if (errorCode == AdvertiseCallback.ADVERTISE_FAILED_DATA_TOO_LARGE && advertiseDeviceName) {
                 // The device name doesn't fit even in the scan response; retry without it.
                 advertiseDeviceName = false
+                advertiseCallback = null
                 startAdvertising()
                 return
             }
+            advertiseCallback = null
             isAdvertising = false
             BleEventBus.emit(
                 mapOf(
@@ -730,6 +757,28 @@ class BluetoothBackgroundService : Service() {
             val address = gatt.device.address ?: return
             emitMessage(address, value)
         }
+    }
+
+    // The stack tears down advertising, scans, GATT links, and the GATT server when
+    // Bluetooth turns off, mostly without callbacks, so reset our state to match and
+    // report the links as gone. Turning it back on restores the saved modes.
+    private val adapterStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            when (intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)) {
+                BluetoothAdapter.STATE_TURNING_OFF, BluetoothAdapter.STATE_OFF -> onBluetoothOff()
+                BluetoothAdapter.STATE_ON -> restoreStateFromPrefs()
+            }
+            emitStatus()
+        }
+    }
+
+    private fun onBluetoothOff() {
+        advertiseCallback = null
+        isAdvertising = false
+        isScanning = false
+        pendingBondAddresses.clear()
+        closeGattServer()
+        disconnectAll()
     }
 
     private val bondStateReceiver = object : BroadcastReceiver() {
@@ -892,6 +941,10 @@ class BluetoothBackgroundService : Service() {
         const val EXTRA_DEVICE_ID = "extra.device.id"
         const val EXTRA_MESSAGE = "extra.message"
         const val EXTRA_PAIR = "extra.pair"
+
+        // Status reported while the adapter is off; Dart shows a banner for it. iOS uses the
+        // same string.
+        const val STATUS_BLUETOOTH_OFF = "bluetooth-off"
 
         private const val PREFS_NAME = "ble_service_prefs"
         private const val PREF_ADVERTISING = "pref_advertising"

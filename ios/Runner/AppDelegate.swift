@@ -104,6 +104,9 @@ final class IOSBleBackgroundManager: NSObject, FlutterStreamHandler {
   // Peripherals the user disconnected on purpose; didDisconnectPeripheral must not
   // reconnect them until they're connected again explicitly.
   private var forgottenPeripherals: Set<UUID> = []
+  private var connectedPeripheralIds: Set<UUID> = []
+  // Links that were up when Bluetooth powered off; reconnected once it's back on.
+  private var peripheralsToReconnect: Set<UUID> = []
   private var advertisingEnabled = false
   private var centralEnabled = false
 
@@ -302,8 +305,19 @@ extension IOSBleBackgroundManager: CBCentralManagerDelegate {
     case .poweredOn:
       if centralEnabled {
         startScanningIfPossible()
+        // Connections don't survive a power cycle; bring back the ones that were up.
+        peripheralsToReconnect
+          .compactMap { peripherals[$0] }
+          .forEach { central.connect($0, options: nil) }
       }
+      peripheralsToReconnect.removeAll()
     case .poweredOff:
+      // CoreBluetooth drops every link without calling didDisconnectPeripheral.
+      peripheralsToReconnect = connectedPeripheralIds.subtracting(forgottenPeripherals)
+      let dropped = connectedPeripheralIds
+      connectedPeripheralIds.removeAll()
+      writableCharacteristics.removeAll()
+      dropped.forEach { emitDisconnectedIfUnlinked($0) }
       emit(type: "status", payload: ["status": "bluetooth-off"])
     default:
       break
@@ -331,6 +345,7 @@ extension IOSBleBackgroundManager: CBCentralManagerDelegate {
   }
 
   func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+    connectedPeripheralIds.insert(peripheral.identifier)
     peripheral.delegate = self
     peripheral.discoverServices([serviceUUID])
     emit(type: "connected", payload: ["deviceId": peripheral.identifier.uuidString])
@@ -342,6 +357,7 @@ extension IOSBleBackgroundManager: CBCentralManagerDelegate {
     error: Error?
   ) {
     writableCharacteristics.removeValue(forKey: peripheral.identifier)
+    connectedPeripheralIds.remove(peripheral.identifier)
     emitDisconnectedIfUnlinked(peripheral.identifier)
     if centralEnabled && !forgottenPeripherals.contains(peripheral.identifier) {
       central.connect(peripheral, options: nil)

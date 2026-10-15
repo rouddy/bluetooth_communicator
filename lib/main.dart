@@ -85,7 +85,20 @@ class HomePage extends StatelessWidget {
           ),
         ],
       ),
-      body: DeviceListPage(controller: controller),
+      body: Column(
+        children: [
+          if (controller.bluetoothOff)
+            Material(
+              color: Theme.of(context).colorScheme.errorContainer,
+              child: const ListTile(
+                leading: Icon(Icons.bluetooth_disabled),
+                title: Text('Bluetooth가 꺼져 있습니다'),
+                subtitle: Text('Bluetooth를 켜면 광고와 연결을 자동으로 다시 시작합니다.'),
+              ),
+            ),
+          Expanded(child: DeviceListPage(controller: controller)),
+        ],
+      ),
     );
   }
 }
@@ -479,6 +492,9 @@ class BleAppController extends ChangeNotifier {
   String backgroundStatus = 'idle';
   String? lastError;
   bool initializing = false;
+
+  /// Both native sides report `bluetooth-off` while the adapter is powered off.
+  bool get bluetoothOff => backgroundStatus == 'bluetooth-off';
   bool permissionsGranted = false;
   bool permissionsPermanentlyDenied = false;
 
