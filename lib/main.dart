@@ -303,7 +303,15 @@ class NotificationPage extends StatelessWidget {
                 subtitle: Text(
                   '${entry.deviceName.isEmpty ? entry.deviceId : entry.deviceName} · ${entry.message.timestamp.toLocal()}',
                 ),
-                trailing: Text(entry.message.outgoing ? 'Sent' : 'Recv'),
+                trailing: Text(
+                  !entry.message.outgoing
+                      ? 'Recv'
+                      : switch (entry.message.status) {
+                          MessageStatus.sending => '전송 중',
+                          MessageStatus.sent => 'Sent',
+                          MessageStatus.failed => '실패',
+                        },
+                ),
               ),
             ),
         ],
@@ -427,11 +435,26 @@ class _DeviceControlPageState extends State<DeviceControlPage> {
               itemCount: messages.length,
               itemBuilder: (context, index) {
                 final message = messages[messages.length - 1 - index];
+                final failed = message.status == MessageStatus.failed;
                 return ListTile(
                   title: Text(message.text),
                   subtitle: Text(
-                    '${message.outgoing ? "Sent" : "Received"} · ${message.timestamp.toLocal()}',
+                    '${message.statusLabel} · ${message.timestamp.toLocal()}',
+                    style: failed
+                        ? TextStyle(color: Theme.of(context).colorScheme.error)
+                        : null,
                   ),
+                  trailing: switch (message.status) {
+                    MessageStatus.sending => const SizedBox.square(
+                      dimension: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                    MessageStatus.failed => Icon(
+                      Icons.error_outline,
+                      color: Theme.of(context).colorScheme.error,
+                    ),
+                    MessageStatus.sent => null,
+                  },
                 );
               },
             ),
@@ -700,14 +723,46 @@ class BleAppController extends ChangeNotifier {
     notifyListeners();
   }
 
+  int _messageCounter = 0;
+
+  /// Shows the message right away as [MessageStatus.sending]; the native
+  /// messageSent/messageFailed event for its id settles the status.
   Future<void> sendMessage(String deviceId, String text) async {
-    final sent = await _invoke('sendMessage', {'deviceId': deviceId, 'message': text});
-    if (sent) {
-      _appendMessage(
-        deviceId,
-        BleMessage(text: text, timestamp: DateTime.now(), outgoing: true),
-      );
+    final message = BleMessage(
+      id: '${DateTime.now().microsecondsSinceEpoch}-${_messageCounter++}',
+      text: text,
+      timestamp: DateTime.now(),
+      outgoing: true,
+      status: MessageStatus.sending,
+    );
+    _appendMessage(deviceId, message);
+    notifyListeners();
+    final accepted = await _invoke('sendMessage', {
+      'deviceId': deviceId,
+      'message': text,
+      'messageId': message.id,
+    });
+    if (!accepted && message.status == MessageStatus.sending) {
+      message
+        ..status = MessageStatus.failed
+        ..error = lastError;
       notifyListeners();
+    }
+  }
+
+  void _settleMessage(Map<String, dynamic> event, MessageStatus status) {
+    final messageId = event['messageId'] as String?;
+    final candidates = switch (event['deviceId'] as String?) {
+      final String deviceId => messagesByDevice[deviceId] ?? const <BleMessage>[],
+      null => messagesByDevice.values.expand((messages) => messages),
+    };
+    for (final message in candidates) {
+      if (message.outgoing && message.id == messageId) {
+        message
+          ..status = status
+          ..error = event['error'] as String?;
+        return;
+      }
     }
   }
 
@@ -809,6 +864,12 @@ class BleAppController extends ChangeNotifier {
           unreadCountByDevice[id] = (unreadCountByDevice[id] ?? 0) + 1;
         }
         break;
+      case 'messageSent':
+        _settleMessage(event, MessageStatus.sent);
+        break;
+      case 'messageFailed':
+        _settleMessage(event, MessageStatus.failed);
+        break;
       case 'error':
         lastError = event['message'] as String?;
         break;
@@ -873,16 +934,44 @@ class BleDevice {
       };
 }
 
+enum MessageStatus {
+  /// Handed to native code, waiting for its messageSent/messageFailed event.
+  sending,
+
+  /// Accepted by the peer's stack (write response or notification sent).
+  /// Received messages are always in this state.
+  sent,
+  failed,
+}
+
 class BleMessage {
   BleMessage({
     required this.text,
     required this.timestamp,
     required this.outgoing,
+    this.id = '',
+    this.status = MessageStatus.sent,
+    this.error,
   });
 
+  /// Identifies an outgoing message in native messageSent/messageFailed events.
+  final String id;
   final String text;
   final DateTime timestamp;
   final bool outgoing;
+  MessageStatus status;
+  String? error;
+
+  String get statusLabel {
+    if (!outgoing) {
+      return 'Received';
+    }
+    return switch (status) {
+      MessageStatus.sending => '전송 중',
+      MessageStatus.sent => 'Sent',
+      MessageStatus.failed => '전송 실패: ${error ?? '알 수 없는 오류'}',
+    };
+  }
 }
 
 class MessageHistoryEntry {

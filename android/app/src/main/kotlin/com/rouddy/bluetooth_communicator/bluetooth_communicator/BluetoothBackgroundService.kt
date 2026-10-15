@@ -19,6 +19,7 @@ import android.bluetooth.BluetoothGattServerCallback
 import android.bluetooth.BluetoothGattService
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
+import android.bluetooth.BluetoothStatusCodes
 import android.bluetooth.le.AdvertiseCallback
 import android.bluetooth.le.AdvertiseData
 import android.bluetooth.le.AdvertiseSettings
@@ -69,6 +70,11 @@ class BluetoothBackgroundService : Service() {
     private val subscribedCentrals = ConcurrentHashMap<String, BluetoothDevice>()
     private val centralMtus = ConcurrentHashMap<String, Int>()
     private val preparedWrites = ConcurrentHashMap<String, ByteArrayOutputStream>()
+
+    // One operation queue per link and role: our client link to a peer, and a central's
+    // link to our GATT server.
+    private val clientQueues = ConcurrentHashMap<String, GattOperationQueue>()
+    private val serverQueues = ConcurrentHashMap<String, GattOperationQueue>()
     private val prefs by lazy { getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) }
 
     @Volatile
@@ -158,8 +164,11 @@ class BluetoothBackgroundService : Service() {
             ACTION_SEND_MESSAGE -> {
                 val deviceId = intent?.getStringExtra(EXTRA_DEVICE_ID)
                 val message = intent?.getStringExtra(EXTRA_MESSAGE)
+                val messageId = intent?.getStringExtra(EXTRA_MESSAGE_ID)
                 if (!deviceId.isNullOrBlank() && !message.isNullOrBlank()) {
-                    sendMessage(deviceId, message)
+                    sendMessage(deviceId, message, messageId)
+                } else if (!deviceId.isNullOrBlank()) {
+                    reportSend(deviceId, messageId, false, "Empty message")
                 }
             }
         }
@@ -318,6 +327,7 @@ class BluetoothBackgroundService : Service() {
         subscribedCentrals.clear()
         centralMtus.clear()
         preparedWrites.clear()
+        failQueues(serverQueues, "GATT server closed")
         centrals.forEach { central ->
             runCatching { server.cancelConnection(central) }
             emitDisconnectedIfUnlinked(central.address)
@@ -415,6 +425,8 @@ class BluetoothBackgroundService : Service() {
             preparedWrites.remove(deviceId)
             runCatching { gattServer?.cancelConnection(central) }
         }
+        clientQueues.remove(deviceId)?.failAll("Disconnected")
+        serverQueues.remove(deviceId)?.failAll("Disconnected")
         // close() unregisters the client callback, so onConnectionStateChange won't report this.
         emitDisconnectedIfUnlinked(deviceId)
         emitStatus()
@@ -427,6 +439,7 @@ class BluetoothBackgroundService : Service() {
         activeConnections.clear()
         pendingConnections.clear()
         writableCharacteristics.clear()
+        failQueues(clientQueues, "Disconnected")
         pending.forEach { runCatching { it.close() } }
         entries.forEach {
             runCatching {
@@ -439,52 +452,119 @@ class BluetoothBackgroundService : Service() {
     }
 
     @SuppressLint("MissingPermission")
-    private fun sendMessage(deviceId: String, message: String) {
+    private fun sendMessage(deviceId: String, message: String, messageId: String?) {
         val payload = message.toByteArray(Charsets.UTF_8)
         val gatt = activeConnections[deviceId]
         val characteristic = writableCharacteristics[deviceId]
         if (gatt == null || characteristic == null) {
             // Not our GATT client link; the peer may be a central subscribed to our server.
-            notifyCentral(deviceId, payload)
+            notifyCentral(deviceId, payload, messageId)
             return
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            gatt.writeCharacteristic(
-                characteristic,
-                payload,
-                BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+        // Longer values than an attribute can hold are rejected by the peer.
+        if (payload.size > MAX_ATTRIBUTE_LENGTH) {
+            reportSend(
+                deviceId,
+                messageId,
+                false,
+                "Message too long (${payload.size}/$MAX_ATTRIBUTE_LENGTH bytes)"
             )
+            return
+        }
+        clientQueue(deviceId).enqueue(
+            GattOperationQueue.Operation(
+                start = { writeMessage(gatt, characteristic, payload) },
+                onComplete = { success, error -> reportSend(deviceId, messageId, success, error) }
+            )
+        )
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun writeMessage(
+        gatt: BluetoothGatt,
+        characteristic: BluetoothGattCharacteristic,
+        payload: ByteArray
+    ): Boolean {
+        val writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            gatt.writeCharacteristic(characteristic, payload, writeType) ==
+                BluetoothStatusCodes.SUCCESS
         } else {
-            characteristic.value = payload
-            characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-            gatt.writeCharacteristic(characteristic)
+            @Suppress("DEPRECATION")
+            run {
+                characteristic.value = payload
+                characteristic.writeType = writeType
+                gatt.writeCharacteristic(characteristic)
+            }
         }
     }
 
     @SuppressLint("MissingPermission")
-    private fun notifyCentral(deviceId: String, payload: ByteArray) {
+    private fun notifyCentral(deviceId: String, payload: ByteArray, messageId: String?) {
         val central = subscribedCentrals[deviceId]
         val server = gattServer
         val characteristic = serverCharacteristic
         if (central == null || server == null || characteristic == null) {
-            emitError("No writable BLE connection for $deviceId")
+            reportSend(deviceId, messageId, false, "No writable BLE connection for $deviceId")
             return
         }
         // A notification can't be split, so it must fit in a single ATT packet.
         val maxPayload = (centralMtus[deviceId] ?: DEFAULT_ATT_MTU) - ATT_HEADER_SIZE
         if (payload.size > maxPayload) {
-            emitError("Message too long (${payload.size}/$maxPayload bytes)")
+            reportSend(deviceId, messageId, false, "Message too long (${payload.size}/$maxPayload bytes)")
             return
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            server.notifyCharacteristicChanged(central, characteristic, false, payload)
-        } else {
-            @Suppress("DEPRECATION")
-            run {
-                characteristic.value = payload
-                server.notifyCharacteristicChanged(central, characteristic, false)
+        serverQueues.getOrPut(deviceId) { GattOperationQueue() }.enqueue(
+            GattOperationQueue.Operation(
+                start = {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        server.notifyCharacteristicChanged(central, characteristic, false, payload) ==
+                            BluetoothStatusCodes.SUCCESS
+                    } else {
+                        @Suppress("DEPRECATION")
+                        run {
+                            characteristic.value = payload
+                            server.notifyCharacteristicChanged(central, characteristic, false)
+                        }
+                    }
+                },
+                onComplete = { success, error -> reportSend(deviceId, messageId, success, error) }
+            )
+        )
+    }
+
+    private fun clientQueue(address: String) =
+        clientQueues.getOrPut(address) { GattOperationQueue() }
+
+    private fun failQueues(queues: ConcurrentHashMap<String, GattOperationQueue>, error: String) {
+        val drained = queues.values.toList()
+        queues.clear()
+        drained.forEach { it.failAll(error) }
+    }
+
+    /**
+     * Reports the outcome of a sendMessage call. Dart tracks each outgoing message by
+     * [messageId]; without one, only failures are reported, as a generic error.
+     */
+    private fun reportSend(deviceId: String, messageId: String?, success: Boolean, error: String?) {
+        if (messageId == null) {
+            if (!success) {
+                emitError("Sending to $deviceId failed: $error")
             }
+            return
         }
+        BleEventBus.emit(
+            if (success) {
+                mapOf("type" to "messageSent", "deviceId" to deviceId, "messageId" to messageId)
+            } else {
+                mapOf(
+                    "type" to "messageFailed",
+                    "deviceId" to deviceId,
+                    "messageId" to messageId,
+                    "error" to (error ?: "Unknown error")
+                )
+            }
+        )
     }
 
     private fun emitMessage(deviceId: String, payload: ByteArray) {
@@ -676,6 +756,7 @@ class BluetoothBackgroundService : Service() {
                     pendingConnections.remove(address)
                     val wasConnected = activeConnections.remove(address) != null
                     writableCharacteristics.remove(address)
+                    clientQueues.remove(address)?.failAll("Disconnected")
                     runCatching { gatt.close() }
                     if (!wasConnected && status != BluetoothGatt.GATT_SUCCESS) {
                         emitError("Connection to $address failed (status $status)")
@@ -703,9 +784,23 @@ class BluetoothBackgroundService : Service() {
             characteristic: BluetoothGattCharacteristic,
             status: Int
         ) {
-            if (status != BluetoothGatt.GATT_SUCCESS) {
-                emitError("Message write to ${gatt.device.address} failed (status $status)")
-            }
+            val address = gatt.device.address ?: return
+            clientQueues[address]?.complete(
+                status == BluetoothGatt.GATT_SUCCESS,
+                "Write failed (status $status)"
+            )
+        }
+
+        override fun onDescriptorWrite(
+            gatt: BluetoothGatt,
+            descriptor: BluetoothGattDescriptor,
+            status: Int
+        ) {
+            val address = gatt.device.address ?: return
+            clientQueues[address]?.complete(
+                status == BluetoothGatt.GATT_SUCCESS,
+                "Descriptor write failed (status $status)"
+            )
         }
 
         @SuppressLint("MissingPermission")
@@ -721,15 +816,18 @@ class BluetoothBackgroundService : Service() {
                 gatt.setCharacteristicNotification(characteristic, true)
                 val cccd = characteristic.getDescriptor(CLIENT_CONFIG_DESCRIPTOR_UUID)
                 if (cccd != null) {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                        gatt.writeDescriptor(cccd, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
-                    } else {
-                        @Suppress("DEPRECATION")
-                        run {
-                            cccd.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                            gatt.writeDescriptor(cccd)
-                        }
-                    }
+                    // Queued like the message writes, so a message sent right after
+                    // connecting doesn't collide with the subscription.
+                    clientQueue(address).enqueue(
+                        GattOperationQueue.Operation(
+                            start = { enableNotifications(gatt, cccd) },
+                            onComplete = { success, error ->
+                                if (!success) {
+                                    emitError("Subscribing to $address failed: $error")
+                                }
+                            }
+                        )
+                    )
                 }
             }
         }
@@ -756,6 +854,20 @@ class BluetoothBackgroundService : Service() {
             }
             val address = gatt.device.address ?: return
             emitMessage(address, value)
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun enableNotifications(gatt: BluetoothGatt, cccd: BluetoothGattDescriptor): Boolean {
+        val value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            gatt.writeDescriptor(cccd, value) == BluetoothStatusCodes.SUCCESS
+        } else {
+            @Suppress("DEPRECATION")
+            run {
+                cccd.value = value
+                gatt.writeDescriptor(cccd)
+            }
         }
     }
 
@@ -820,10 +932,19 @@ class BluetoothBackgroundService : Service() {
             val address = device.address ?: return
             centralMtus.remove(address)
             preparedWrites.remove(address)
+            serverQueues.remove(address)?.failAll("Disconnected")
             if (subscribedCentrals.remove(address) != null) {
                 emitDisconnectedIfUnlinked(address)
                 emitStatus()
             }
+        }
+
+        override fun onNotificationSent(device: BluetoothDevice, status: Int) {
+            val address = device.address ?: return
+            serverQueues[address]?.complete(
+                status == BluetoothGatt.GATT_SUCCESS,
+                "Notification failed (status $status)"
+            )
         }
 
         override fun onMtuChanged(device: BluetoothDevice, mtu: Int) {
@@ -916,6 +1037,7 @@ class BluetoothBackgroundService : Service() {
                             )
                         )
                     } else {
+                        serverQueues.remove(address)?.failAll("Unsubscribed")
                         emitDisconnectedIfUnlinked(address)
                     }
                     emitStatus()
@@ -940,6 +1062,7 @@ class BluetoothBackgroundService : Service() {
 
         const val EXTRA_DEVICE_ID = "extra.device.id"
         const val EXTRA_MESSAGE = "extra.message"
+        const val EXTRA_MESSAGE_ID = "extra.message.id"
         const val EXTRA_PAIR = "extra.pair"
 
         // Status reported while the adapter is off; Dart shows a banner for it. iOS uses the
@@ -961,6 +1084,7 @@ class BluetoothBackgroundService : Service() {
         private const val DEFAULT_ATT_MTU = 23
         private const val MAX_ATT_MTU = 517
         private const val ATT_HEADER_SIZE = 3
+        private const val MAX_ATTRIBUTE_LENGTH = 512
         private val CLIENT_CONFIG_DESCRIPTOR_UUID =
             UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
     }

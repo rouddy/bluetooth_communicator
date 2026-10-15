@@ -126,6 +126,75 @@ void main() {
     });
   });
 
+  group('sendMessage', () {
+    Future<void> nativeEvent(Map<String, dynamic> event) {
+      return messenger.handlePlatformMessage(
+        _eventsChannel.name,
+        const StandardMethodCodec().encodeSuccessEnvelope(event),
+        (_) {},
+      );
+    }
+
+    test('shows the message as sending until native code reports the '
+        'outcome', () async {
+      registerNativeHandler();
+      final controller = BleAppController();
+      await controller.initialize();
+
+      await controller.sendMessage('AA:AA', 'first');
+      await controller.sendMessage('AA:AA', 'second');
+      final [first, second] = controller.messagesByDevice['AA:AA']!;
+      expect([first.status, second.status], [
+        MessageStatus.sending,
+        MessageStatus.sending,
+      ]);
+      final sendCall = nativeCalls.lastWhere((c) => c.method == 'sendMessage');
+      expect(sendCall.arguments, {
+        'deviceId': 'AA:AA',
+        'message': 'second',
+        'messageId': second.id,
+      });
+      expect(first.id, isNot(second.id));
+
+      await nativeEvent({
+        'type': 'messageFailed',
+        'deviceId': 'AA:AA',
+        'messageId': second.id,
+        'error': 'Write failed (status 133)',
+      });
+      await nativeEvent({
+        'type': 'messageSent',
+        'deviceId': 'AA:AA',
+        'messageId': first.id,
+      });
+
+      expect(first.status, MessageStatus.sent);
+      expect(first.statusLabel, 'Sent');
+      expect(second.status, MessageStatus.failed);
+      expect(second.statusLabel, '전송 실패: Write failed (status 133)');
+    });
+
+    test('fails the message when native code rejects the call', () async {
+      messenger.setMockMethodCallHandler(_controlChannel, (call) async {
+        if (call.method == 'sendMessage') {
+          throw PlatformException(
+            code: 'SERVICE_UNAVAILABLE',
+            message: 'Bluetooth service unavailable',
+          );
+        }
+        return null;
+      });
+      final controller = BleAppController();
+      await controller.initialize();
+
+      await controller.sendMessage('AA:AA', 'hello');
+
+      final message = controller.messagesByDevice['AA:AA']!.single;
+      expect(message.status, MessageStatus.failed);
+      expect(message.error, contains('Bluetooth service unavailable'));
+    });
+  });
+
   group('removeDevice', () {
     test('forgets the device, persists it, and disconnects it natively', () async {
       registerNativeHandler();

@@ -72,7 +72,9 @@
   - `STATE_OFF`가 오면 내부 상태와 연결을 정리하고 `disconnected` 이벤트를 보냅니다.
   - `STATE_ON`이 오면 `restoreStateFromPrefs()`를 호출합니다.
 
-### 8. 전송 실패가 "Sent"로 표시됨 `코드`
+### 8. 전송 실패가 "Sent"로 표시됨 `확인됨` ✅ 해결
+- 확인: S23에서 Jump3로 메시지 5개를 연달아 보내자(`integration_test/burst_send_test.dart`), 수정 전에는 S23에 전부 "Sent"로 표시됐지만 Jump3에는 3개만 도착했습니다(2, 4번 유실).
+- 해결: Android에 링크별 GATT 작업 큐(`GattOperationQueue`)를 두고, 메시지마다 id를 붙여 `messageSent`/`messageFailed`로 결과를 보고합니다. iOS는 write 응답 순서와 notify 대기열로 결과를 맞춥니다. 채팅에는 전송 중/Sent/전송 실패가 표시됩니다. 수정 후에는 5개가 순서대로 모두 도착했고, 상대가 Bluetooth를 끈 뒤 보낸 메시지는 `전송 실패: Write failed (status 1)`로 표시됐습니다. 테스트: Kotlin 큐 단위 테스트 4개, Dart 상태 테스트, 채팅 위젯 테스트. iOS의 전송 결과 보고는 기기에서 확인하지 못했습니다.
 - Android
   - GATT 작업 큐가 없습니다. Android는 연결 하나당 동시에 GATT 작업 하나만 허용하는데, `writeCharacteristic`과 `notifyCharacteristicChanged`의 반환값을 무시합니다.
   - 그래서 CCCD write가 진행 중이거나 이전 전송이 끝나기 전에 보낸 메시지는 조용히 버려집니다.

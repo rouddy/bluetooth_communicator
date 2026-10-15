@@ -2,14 +2,16 @@
 // counts what arrives. Android allows one outstanding GATT operation per link,
 // so a burst exposes writes/notifications that get dropped.
 //
-// Start the receiver first, then the sender:
+// Start the receiver first, and the sender once it prints `IT_STEP app ready`:
 //   flutter drive --driver=test_driver/integration_test.dart \
 //     --target=integration_test/burst_send_test.dart -d <receiver> \
 //     --dart-define=ROLE=receiver --dart-define=PEER=<sender name>
 //   flutter drive ... -d <sender> \
 //     --dart-define=ROLE=sender --dart-define=PEER=<receiver name>
 // PEER is a substring of the other phone's name in the device list. The two
-// phones must already be paired (connect them once through the app).
+// phones must already be paired (connect them once through the app), and the app
+// needs its runtime permissions (e.g. installed with `adb install -g`). Pass
+// --keep-app-running: on Android, stopping the app afterwards removed it.
 
 import 'package:bluetooth_communicator/main.dart' as app;
 import 'package:flutter/material.dart';
@@ -47,6 +49,9 @@ Future<void> openPeerChat(WidgetTester tester) async {
   app.main();
   await pumpUntilFound(tester, find.text('기기 목록'));
   await pumpUntilGone(tester, find.byType(LinearProgressIndicator));
+  await ensureBleModesEnabled(tester);
+  // The other phone can only find this one from here on (it's advertising now).
+  debugPrint('IT_STEP app ready');
   final peerTile = find.textContaining(peer);
   await pumpUntilFound(tester, peerTile, timeout: const Duration(minutes: 5));
   await tester.tap(peerTile.first);
@@ -98,6 +103,9 @@ void main() {
     // messages scroll out of view and aren't built.
     FocusManager.instance.primaryFocus?.unfocus();
     await tester.pumpAndSettle();
-    debugPrint('IT_RESULT sender sees: ${messageLines(tester)}');
+    final lines = messageLines(tester);
+    debugPrint('IT_RESULT sender sees: $lines');
+    // Each message reports its real outcome (sending → Sent / 전송 실패).
+    expect(lines, [for (var i = 1; i <= count; i++) '${burstText(i)} [Sent]']);
   });
 }
