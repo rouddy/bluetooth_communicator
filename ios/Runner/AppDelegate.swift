@@ -288,11 +288,13 @@ final class IOSBleBackgroundManager: NSObject, FlutterStreamHandler {
 
   private func addMessageServiceIfNeeded() {
     guard !serviceAdded, !addingService else { return }
+    // Like the Android server: writes and subscriptions need an encrypted (bonded)
+    // link, so an unbonded central is asked to pair first.
     let characteristic = CBMutableCharacteristic(
       type: messageCharacteristicUUID,
-      properties: [.write, .writeWithoutResponse, .notify],
+      properties: [.write, .writeWithoutResponse, .notifyEncryptionRequired],
       value: nil,
-      permissions: [.writeable]
+      permissions: [.writeEncryptionRequired]
     )
     let service = CBMutableService(type: serviceUUID, primary: true)
     service.characteristics = [characteristic]

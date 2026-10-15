@@ -297,17 +297,21 @@ class BluetoothBackgroundService : Service() {
             return true
         }
         val server = bluetoothManager.openGattServer(this, gattServerCallback) ?: return false
+        // Writing a message or subscribing needs an encrypted link, i.e. a bonded peer.
+        // Unbonded centrals get "insufficient encryption", which makes iOS (and other
+        // stacks) start pairing, instead of chatting under a rotating random address.
         val characteristic = BluetoothGattCharacteristic(
             MESSAGE_CHARACTERISTIC_UUID,
             BluetoothGattCharacteristic.PROPERTY_WRITE or
                 BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE or
                 BluetoothGattCharacteristic.PROPERTY_NOTIFY,
-            BluetoothGattCharacteristic.PERMISSION_WRITE
+            BluetoothGattCharacteristic.PERMISSION_WRITE_ENCRYPTED
         )
         characteristic.addDescriptor(
             BluetoothGattDescriptor(
                 CLIENT_CONFIG_DESCRIPTOR_UUID,
-                BluetoothGattDescriptor.PERMISSION_READ or BluetoothGattDescriptor.PERMISSION_WRITE
+                BluetoothGattDescriptor.PERMISSION_READ_ENCRYPTED or
+                    BluetoothGattDescriptor.PERMISSION_WRITE_ENCRYPTED
             )
         )
         val service = BluetoothGattService(SERVICE_UUID, BluetoothGattService.SERVICE_TYPE_PRIMARY)

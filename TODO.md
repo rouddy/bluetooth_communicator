@@ -84,7 +84,8 @@
   - 연결별 GATT 작업 큐를 둡니다.
   - 메시지마다 ID를 붙이고 `sent`/`failed` 이벤트를 추가해서 메시지별 상태(전송 중/완료/실패)를 표시합니다. 메시지 ID는 23번(메시지 프로토콜)과 함께 정합니다.
 
-### 9. Android characteristic이 암호화를 요구하지 않음 `코드`
+### 9. Android characteristic이 암호화를 요구하지 않음 `코드` ✅ 해결
+- 해결: Android와 iOS GATT server의 message characteristic과 CCCD에 암호화를 요구합니다(`PERMISSION_*_ENCRYPTED`, `.writeEncryptionRequired`/`.notifyEncryptionRequired`). 페어링된 S23 ↔ Jump3는 양방향 burst 테스트에서 5/5가 그대로 도착했습니다. 페어링 안 된 central(iPhone)에 페어링 요청이 뜨는지는 10번에서 함께 확인합니다.
 - 페어링하지 않은 central(iOS 포함)도 GATT server에 연결해서 구독하고 write할 수 있습니다.
 - 문제
   - 그런 central은 계속 바뀌는 랜덤 주소로 등록됩니다. 같은 기기가 다른 기기로 보이는 문제가 다시 생깁니다.
