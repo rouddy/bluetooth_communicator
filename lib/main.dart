@@ -435,6 +435,11 @@ class DeviceControlPage extends StatefulWidget {
 
 class _DeviceControlPageState extends State<DeviceControlPage>
     with WidgetsBindingObserver {
+  /// Below this height (the screen above the keyboard), the link header moves
+  /// into the app bar so the messages and the input still fit, e.g. in
+  /// landscape with the keyboard open.
+  static const double _compactHeight = 400;
+
   final TextEditingController _textController = TextEditingController();
 
   @override
@@ -501,6 +506,31 @@ class _DeviceControlPageState extends State<DeviceControlPage>
     Navigator.of(context).pop();
   }
 
+  Widget _linkButton() {
+    return switch (widget.controller.linkStateFor(widget.device.identifier)) {
+      LinkState.connected => const FilledButton.tonal(
+        onPressed: null,
+        child: Text('연결됨'),
+      ),
+      LinkState.connecting || LinkState.bonding => const FilledButton.tonal(
+        onPressed: null,
+        child: SizedBox.square(
+          dimension: 16,
+          child: CircularProgressIndicator(strokeWidth: 2),
+        ),
+      ),
+      LinkState.disconnected || LinkState.pairingLost => FilledButton.tonal(
+        onPressed: () {
+          widget.controller.connectDevice(
+            widget.device.identifier,
+            pair: true,
+          );
+        },
+        child: const Text('연결'),
+      ),
+    };
+  }
+
   @override
   Widget build(BuildContext context) {
     final isConnected = widget.controller.connectedDeviceIds.contains(
@@ -509,10 +539,25 @@ class _DeviceControlPageState extends State<DeviceControlPage>
     final messages =
         widget.controller.messagesByDevice[widget.device.identifier] ??
         <BleMessage>[];
+    final name = widget.device.name.isEmpty ? widget.device.identifier : widget.device.name;
+    final linkLabel = widget.controller.linkLabel(widget.device.identifier);
+    final compact =
+        MediaQuery.sizeOf(context).height - MediaQuery.viewInsetsOf(context).bottom <
+        _compactHeight;
     return Scaffold(
       appBar: AppBar(
-        title: Text(widget.device.name.isEmpty ? widget.device.identifier : widget.device.name),
+        title: compact
+            ? Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(name),
+                  Text(linkLabel, style: Theme.of(context).textTheme.bodySmall),
+                ],
+              )
+            : Text(name),
         actions: [
+          if (compact) _linkButton(),
           if (widget.controller.isKnownDevice(widget.device.identifier))
             IconButton(
               tooltip: '기기 삭제',
@@ -523,38 +568,17 @@ class _DeviceControlPageState extends State<DeviceControlPage>
       ),
       body: Column(
         children: [
-          ListTile(
-            leading: Icon(
-              isConnected ? Icons.bluetooth_connected : Icons.bluetooth_disabled,
+          if (!compact) ...[
+            ListTile(
+              leading: Icon(
+                isConnected ? Icons.bluetooth_connected : Icons.bluetooth_disabled,
+              ),
+              title: Text(linkLabel),
+              subtitle: Text(widget.device.identifier),
+              trailing: _linkButton(),
             ),
-            title: Text(widget.controller.linkLabel(widget.device.identifier)),
-            subtitle: Text(widget.device.identifier),
-            trailing: switch (widget.controller.linkStateFor(
-              widget.device.identifier,
-            )) {
-              LinkState.connected => const FilledButton.tonal(
-                onPressed: null,
-                child: Text('연결됨'),
-              ),
-              LinkState.connecting || LinkState.bonding => const FilledButton.tonal(
-                onPressed: null,
-                child: SizedBox.square(
-                  dimension: 16,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                ),
-              ),
-              LinkState.disconnected || LinkState.pairingLost => FilledButton.tonal(
-                onPressed: () {
-                  widget.controller.connectDevice(
-                    widget.device.identifier,
-                    pair: true,
-                  );
-                },
-                child: const Text('연결'),
-              ),
-            },
-          ),
-          const Divider(height: 1),
+            const Divider(height: 1),
+          ],
           Expanded(
             child: ListView.builder(
               reverse: true,
@@ -588,7 +612,9 @@ class _DeviceControlPageState extends State<DeviceControlPage>
           SafeArea(
             top: false,
             child: Padding(
-              padding: const EdgeInsets.all(12),
+              padding: compact
+                  ? const EdgeInsets.symmetric(horizontal: 12, vertical: 4)
+                  : const EdgeInsets.all(12),
               child: ValueListenableBuilder<TextEditingValue>(
                 valueListenable: _textController,
                 builder: (context, value, _) {
@@ -603,6 +629,7 @@ class _DeviceControlPageState extends State<DeviceControlPage>
                           controller: _textController,
                           decoration: InputDecoration(
                             border: const OutlineInputBorder(),
+                            isDense: compact,
                             hintText: '메시지 입력',
                             // Shown close to the limit, so it doesn't come as a surprise.
                             counterText: bytes > maxMessageBytes * 0.8
