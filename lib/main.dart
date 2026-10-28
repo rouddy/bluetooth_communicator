@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io' show Platform;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -229,10 +229,35 @@ class _SectionHeader extends StatelessWidget {
   }
 }
 
-class SettingsPage extends StatelessWidget {
+class SettingsPage extends StatefulWidget {
   const SettingsPage({super.key, required this.controller});
 
   final BleAppController controller;
+
+  @override
+  State<SettingsPage> createState() => _SettingsPageState();
+}
+
+class _SettingsPageState extends State<SettingsPage> {
+  late final AppLifecycleListener _lifecycleListener;
+
+  BleAppController get controller => widget.controller;
+
+  @override
+  void initState() {
+    super.initState();
+    // The permission tiles send the user to system settings; show what they
+    // changed there when they come back.
+    _lifecycleListener = AppLifecycleListener(
+      onResume: controller.refreshPermissions,
+    );
+  }
+
+  @override
+  void dispose() {
+    _lifecycleListener.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -264,33 +289,45 @@ class SettingsPage extends StatelessWidget {
             title: const Text('즉시 스캔 실행'),
             onTap: controller.scanNow,
           ),
-          ListTile(
-            leading: const Icon(Icons.security),
-            title: Text(
-              controller.permissionsPermanentlyDenied ? '권한 설정 열기' : '권한 요청',
+          if (controller.permissionsGranted) ...[
+            const ListTile(
+              leading: Icon(Icons.security),
+              title: Text('권한'),
+              subtitle: Text('Bluetooth 권한 허용됨'),
             ),
-            subtitle: Text(
-              controller.permissionsGranted
-                  ? 'Bluetooth 권한 허용됨'
-                  : controller.permissionsPermanentlyDenied
-                  ? '거부된 권한은 시스템 설정에서 허용해야 합니다'
-                  : 'Bluetooth 및 알림 권한 허용',
+            if (controller.notificationsDenied)
+              const ListTile(
+                leading: Icon(Icons.notifications_off_outlined),
+                title: Text('알림 설정 열기'),
+                subtitle: Text('알림이 꺼져 있어 앱을 보고 있지 않을 때 온 메시지를 알려줄 수 없습니다'),
+                onTap: openAppSettings,
+              ),
+          ] else
+            ListTile(
+              leading: const Icon(Icons.security),
+              title: Text(
+                controller.permissionsPermanentlyDenied ? '권한 설정 열기' : '권한 요청',
+              ),
+              subtitle: Text(
+                controller.permissionsPermanentlyDenied
+                    ? '거부된 권한은 시스템 설정에서 허용해야 합니다'
+                    : 'Bluetooth 및 알림 권한 허용',
+              ),
+              onTap: () async {
+                // Re-check first: the user may have granted them in system settings.
+                if (await controller.checkPermissions()) {
+                  await controller.initialize();
+                  return;
+                }
+                if (controller.permissionsPermanentlyDenied) {
+                  await openAppSettings();
+                  return;
+                }
+                if (await controller.requestPermissions()) {
+                  await controller.initialize();
+                }
+              },
             ),
-            onTap: () async {
-              // Re-check first: the user may have granted them in system settings.
-              if (await controller.checkPermissions()) {
-                await controller.initialize();
-                return;
-              }
-              if (controller.permissionsPermanentlyDenied) {
-                await openAppSettings();
-                return;
-              }
-              if (await controller.requestPermissions()) {
-                await controller.initialize();
-              }
-            },
-          ),
           ListTile(
             leading: const Icon(Icons.info_outline),
             title: const Text('Background 상태'),
@@ -670,6 +707,12 @@ class BleAppController extends ChangeNotifier {
   bool permissionsGranted = false;
   bool permissionsPermanentlyDenied = false;
 
+  /// Whether the user turned notifications off. Android only, and not part of
+  /// [permissionsGranted]: without them the app still works, but the user
+  /// isn't told about messages that arrive while it's in the background.
+  bool notificationsDenied = false;
+  bool _requestingPermissions = false;
+
   final List<BleDevice> discoveredDevices = <BleDevice>[];
   final List<BleDevice> registeredDevices = <BleDevice>[];
   final Set<String> connectedDeviceIds = <String>{};
@@ -723,7 +766,8 @@ class BleAppController extends ChangeNotifier {
   }
 
   /// Permissions the native side needs before it can advertise, scan, or connect.
-  static List<Permission> get _blePermissions => Platform.isIOS
+  static List<Permission> get _blePermissions =>
+      defaultTargetPlatform == TargetPlatform.iOS
       ? const [Permission.bluetooth]
       : const [
           Permission.bluetoothScan,
@@ -731,8 +775,15 @@ class BleAppController extends ChangeNotifier {
           Permission.bluetoothAdvertise,
         ];
 
+  /// iOS doesn't post notifications, so it never asks for them.
+  static bool get _usesNotifications =>
+      defaultTargetPlatform == TargetPlatform.android;
+
   Future<bool> checkPermissions() async {
     final statuses = await Future.wait(_blePermissions.map((p) => p.status));
+    if (_usesNotifications) {
+      notificationsDenied = !(await Permission.notification.status).isGranted;
+    }
     // On Android, `status` reports a permanent denial as plain `denied` (only a
     // request reveals it), so keep an earlier permanent denial until granted.
     final wasPermanentlyDenied = permissionsPermanentlyDenied;
@@ -748,15 +799,37 @@ class BleAppController extends ChangeNotifier {
   /// notification permission is optional: the foreground service runs without
   /// it, only its notification is hidden.
   Future<bool> requestPermissions() async {
-    final statuses = await [
-      ..._blePermissions,
-      if (Platform.isAndroid) Permission.notification,
-    ].request();
-    _updatePermissionState(
-      _blePermissions.map((p) => statuses[p] ?? PermissionStatus.denied),
-    );
+    _requestingPermissions = true;
+    try {
+      final statuses = await [
+        ..._blePermissions,
+        if (_usesNotifications) Permission.notification,
+      ].request();
+      _updatePermissionState(
+        _blePermissions.map((p) => statuses[p] ?? PermissionStatus.denied),
+      );
+      if (_usesNotifications) {
+        notificationsDenied = statuses[Permission.notification]?.isGranted != true;
+      }
+    } finally {
+      _requestingPermissions = false;
+    }
     notifyListeners();
     return permissionsGranted;
+  }
+
+  /// Re-checks the permissions when the user may have changed them in system
+  /// settings, and starts Bluetooth if they were granted there.
+  Future<void> refreshPermissions() async {
+    // A request in progress shows a system dialog, which pauses the app; its
+    // caller handles the result.
+    if (_requestingPermissions || initializing) {
+      return;
+    }
+    final wasGranted = permissionsGranted;
+    if (await checkPermissions() && !wasGranted) {
+      await initialize();
+    }
   }
 
   void _updatePermissionState(Iterable<PermissionStatus> statuses) {

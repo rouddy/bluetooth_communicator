@@ -481,5 +481,59 @@ void main() {
       expect(granted, isTrue);
       expect(controller.permissionsPermanentlyDenied, isFalse);
     });
+
+    test('turned-off notifications are tracked apart from the Bluetooth '
+        'permissions', () async {
+      permissions.results[Permission.notification] = PermissionStatus.denied;
+      final controller = BleAppController();
+
+      expect(await controller.checkPermissions(), isTrue);
+      expect(controller.notificationsDenied, isTrue);
+
+      permissions.results[Permission.notification] = PermissionStatus.granted;
+      await controller.checkPermissions();
+      expect(controller.notificationsDenied, isFalse);
+    });
+
+    test('refreshPermissions starts Bluetooth once the permissions were '
+        'granted in system settings', () async {
+      registerNativeHandler();
+      permissions
+        ..checkResult = PermissionStatus.denied
+        ..requestResult = PermissionStatus.permanentlyDenied;
+      final controller = BleAppController();
+      await controller.initialize();
+      expect(nativeCalls, isEmpty);
+
+      permissions.checkResult = PermissionStatus.granted;
+      await controller.refreshPermissions();
+      expect(controller.permissionsGranted, isTrue);
+      expect(nativeCalls.where((call) => call.method == 'initialize'), hasLength(1));
+
+      // Already running: coming back again doesn't replay the saved state.
+      await controller.refreshPermissions();
+      expect(nativeCalls.where((call) => call.method == 'initialize'), hasLength(1));
+    });
+
+    test('refreshPermissions leaves a pending request to its caller', () async {
+      registerNativeHandler();
+      permissions
+        ..checkResult = PermissionStatus.denied
+        ..requestResult = PermissionStatus.denied
+        ..requestGate = Completer<void>();
+      final controller = BleAppController();
+
+      // The permission dialog pauses the app, and it resumes before the
+      // request returns.
+      final request = controller.requestPermissions();
+      await pumpEventQueue();
+      permissions.checkResult = PermissionStatus.granted;
+      await controller.refreshPermissions();
+      expect(controller.permissionsGranted, isFalse);
+      expect(nativeCalls, isEmpty);
+
+      permissions.requestGate!.complete();
+      expect(await request, isFalse);
+    });
   });
 }
