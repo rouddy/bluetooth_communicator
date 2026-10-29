@@ -213,17 +213,20 @@
 ## P3: 구조, 품질
 
 ### 23. 메시지 프로토콜 정의
+- 설계: [docs/protocol.md](docs/protocol.md). 아직 구현하지 않았고, 구현 순서는 문서의 14절에 있습니다.
+- 방향: 텍스트 채팅은 프로토콜 검증용입니다. 실제 목표는 원격 조작(`/control/media`)과, 다른 앱이 AIDL로 상대 폰의 같은 앱과 통신하는 것입니다. 일반 앱은 Wi-Fi 테더링을 제어할 수 없어서 범위에서 뺐습니다. 페어링은 peripheral이 시작하고, peer마다 확인 코드를 보여 주고 사용자 승인을 받습니다.
 - 지금은 UTF-8 바이트만 그대로 보냅니다. 메시지 ID, 타임스탬프, 보낸 기기 이름, 버전, 수신 확인(ack)이 없습니다.
 - 이런 문제와 연결됩니다.
   - 중복 수신을 거를 수 없습니다(이중 링크나 재전송 시).
   - 상대가 받았는지 확인할 수 없습니다(8번).
   - 긴 메시지를 나눠 보낼 수 없습니다(17번).
   - iOS central처럼 이름이 없는 peer가 `(Unknown)`으로 보입니다.
-- 간단한 프레임(JSON이나 TLV)에 메시지 ID와 ack를 넣는 방식을 권장합니다.
+- 설계에서는 이 문제들을 msgId와 중복 제거, ACK, Frame 분할, HELLO의 이름으로 풉니다.
 
 ### 24. 페어링된 두 Android 폰 사이에 링크가 두 개 생김
 - 두 폰 모두 central이 켜져 있으면 서로의 server에 연결해서 링크가 두 개 생깁니다. 지금은 `emitDisconnectedIfUnlinked`로 연결 상태를 맞추고 있습니다.
 - 동작에는 문제가 없지만 연결 슬롯과 배터리를 낭비합니다. 주소를 비교하는 식의 규칙으로 한쪽만 central이 되게 할 수 있습니다.
+- 프로토콜 설계에서는 peer당 링크를 하나만 둡니다. 이미 연결된 기기가 반대 역할로 새로 연결하면, HELLO에서 같은 peerId를 확인하고 그 연결을 실패시킵니다([docs/protocol.md](docs/protocol.md) 9절).
 
 ### 25. 네이티브가 Dart prefs 저장 형식에 의존함
 - 서비스가 `FlutterSharedPreferences`의 `flutter.prefs_registered_devices` 키를 직접 파싱합니다.
