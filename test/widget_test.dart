@@ -17,7 +17,6 @@ void main() {
     await tester.pump();
 
     expect(find.text('기기 목록'), findsOneWidget);
-    expect(find.byIcon(Icons.notifications_none), findsOneWidget);
     expect(find.byIcon(Icons.settings), findsOneWidget);
   });
 }

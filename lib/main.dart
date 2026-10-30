@@ -14,17 +14,11 @@ const String _bleEventsChannelName =
 const String _prefsAdvertisingEnabled = 'prefs_advertising_enabled';
 const String _prefsCentralEnabled = 'prefs_central_enabled';
 const String _prefsRegisteredDevices = 'prefs_registered_devices';
-const String _prefsMessages = 'prefs_messages';
-const String _prefsUnreadCounts = 'prefs_unread_counts';
 const String _prefsPairingLost = 'prefs_pairing_lost';
 
-/// Longest message, in UTF-8 bytes, that can be sent: a GATT attribute value holds
-/// at most 512 bytes. Notifications are further limited by the link's MTU (514
-/// bytes with the 517 MTU the app negotiates); native code rejects those.
-const int maxMessageBytes = 512;
-
-/// Messages kept per device in [_prefsMessages]; older ones are dropped.
-const int _storedMessagesPerDevice = 200;
+/// Keys of the removed chat (message history and unread counts), deleted on
+/// launch.
+const List<String> _obsoletePrefs = ['prefs_messages', 'prefs_unread_counts'];
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -105,17 +99,6 @@ class HomePage extends StatelessWidget {
             : null,
         actions: [
           IconButton(
-            tooltip: 'Notifications',
-            icon: const Icon(Icons.notifications_none),
-            onPressed: () {
-              Navigator.of(context).push(
-                MaterialPageRoute<void>(
-                  builder: (_) => NotificationPage(controller: controller),
-                ),
-              );
-            },
-          ),
-          IconButton(
             tooltip: 'Settings',
             icon: const Icon(Icons.settings),
             onPressed: () {
@@ -175,7 +158,6 @@ class DeviceListPage extends StatelessWidget {
 
   Widget _buildKnownTile(BuildContext context, BleDevice device) {
     final isConnected = controller.connectedDeviceIds.contains(device.identifier);
-    final unreadCount = controller.unreadCountFor(device.identifier);
     return ListTile(
       leading: Icon(
         isConnected ? Icons.bluetooth_connected : Icons.bluetooth_disabled,
@@ -184,16 +166,7 @@ class DeviceListPage extends StatelessWidget {
       subtitle: Text(
         '${controller.linkLabel(device.identifier)} · ${device.identifier}',
       ),
-      trailing: unreadCount > 0
-          ? Badge(
-              label: Text(unreadCount.toString()),
-              child: const Icon(Icons.mark_chat_unread_outlined),
-            )
-          : null,
-      onTap: () {
-        controller.clearUnreadForDevice(device.identifier);
-        _openDevice(context, device);
-      },
+      onTap: () => _openDevice(context, device),
     );
   }
 
@@ -299,7 +272,7 @@ class _SettingsPageState extends State<SettingsPage> {
               const ListTile(
                 leading: Icon(Icons.notifications_off_outlined),
                 title: Text('알림 설정 열기'),
-                subtitle: Text('알림이 꺼져 있어 앱을 보고 있지 않을 때 온 메시지를 알려줄 수 없습니다'),
+                subtitle: Text('알림이 꺼져 있어 앱을 보고 있지 않을 때 온 요청을 알려줄 수 없습니다'),
                 onTap: openAppSettings,
               ),
           ] else
@@ -350,76 +323,7 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 }
 
-class NotificationPage extends StatelessWidget {
-  const NotificationPage({super.key, required this.controller});
-
-  final BleAppController controller;
-
-  @override
-  Widget build(BuildContext context) {
-    return ListenableBuilder(
-      listenable: controller,
-      builder: (context, _) => _buildPage(context),
-    );
-  }
-
-  Widget _buildPage(BuildContext context) {
-    final unreadDevices = controller.devicesWithUnreadMessages;
-    final history = controller.messageHistory;
-    return Scaffold(
-      appBar: AppBar(title: const Text('Notifications')),
-      body: ListView(
-        padding: const EdgeInsets.all(16),
-        children: [
-          Text('읽지 않은 기기', style: Theme.of(context).textTheme.titleMedium),
-          const SizedBox(height: 8),
-          if (unreadDevices.isEmpty)
-            const Text('읽지 않은 메시지가 없습니다.')
-          else
-            ...unreadDevices.map(
-              (device) => Card(
-                child: ListTile(
-                  title: Text(device.name.isEmpty ? '(Unknown)' : device.name),
-                  subtitle: Text(device.identifier),
-                  trailing: Badge(
-                    label: Text(
-                      controller.unreadCountFor(device.identifier).toString(),
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          const SizedBox(height: 16),
-          Text('Message history', style: Theme.of(context).textTheme.titleMedium),
-          const SizedBox(height: 8),
-          if (history.isEmpty)
-            const Text('메시지 기록이 없습니다.')
-          else
-            ...history.map(
-              (entry) => ListTile(
-                dense: true,
-                title: Text(entry.message.text),
-                subtitle: Text(
-                  '${entry.deviceName.isEmpty ? entry.deviceId : entry.deviceName} · ${entry.message.timestamp.toLocal()}',
-                ),
-                trailing: Text(
-                  !entry.message.outgoing
-                      ? 'Recv'
-                      : switch (entry.message.status) {
-                          MessageStatus.sending => '전송 중',
-                          MessageStatus.sent => 'Sent',
-                          MessageStatus.failed => '실패',
-                        },
-                ),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-}
-
-class DeviceControlPage extends StatefulWidget {
+class DeviceControlPage extends StatelessWidget {
   const DeviceControlPage({
     super.key,
     required this.controller,
@@ -430,58 +334,20 @@ class DeviceControlPage extends StatefulWidget {
   final BleDevice device;
 
   @override
-  State<DeviceControlPage> createState() => _DeviceControlPageState();
-}
-
-class _DeviceControlPageState extends State<DeviceControlPage>
-    with WidgetsBindingObserver {
-  /// Below this height (the screen above the keyboard), the link header moves
-  /// into the app bar so the messages and the input still fit, e.g. in
-  /// landscape with the keyboard open.
-  static const double _compactHeight = 400;
-
-  final TextEditingController _textController = TextEditingController();
-
-  @override
-  void initState() {
-    super.initState();
-    widget.controller.addListener(_onControllerUpdate);
-    widget.controller.openChat(widget.device.identifier);
-    WidgetsBinding.instance.addObserver(this);
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: controller,
+      builder: (context, _) => _buildPage(context),
+    );
   }
 
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    // Messages that arrived while the app was in the background were counted as
-    // unread; the user is looking at them now.
-    if (state == AppLifecycleState.resumed) {
-      widget.controller.clearUnreadForDevice(widget.device.identifier);
-    }
-  }
-
-  void _onControllerUpdate() {
-    if (!mounted) {
-      return;
-    }
-    setState(() {});
-  }
-
-  @override
-  void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
-    widget.controller.closeChat(widget.device.identifier);
-    widget.controller.removeListener(_onControllerUpdate);
-    _textController.dispose();
-    super.dispose();
-  }
-
-  Future<void> _confirmRemove() async {
+  Future<void> _confirmRemove(BuildContext context) async {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('기기 삭제'),
         content: const Text(
-          '연결 기록과 메시지를 삭제하고 연결을 끊습니다. '
+          '연결 기록을 삭제하고 연결을 끊습니다. '
           '페어링 정보는 시스템 Bluetooth 설정에서 따로 해제해야 합니다.',
         ),
         actions: [
@@ -499,15 +365,15 @@ class _DeviceControlPageState extends State<DeviceControlPage>
     if (confirmed != true) {
       return;
     }
-    await widget.controller.removeDevice(widget.device.identifier);
-    if (!mounted) {
+    await controller.removeDevice(device.identifier);
+    if (!context.mounted) {
       return;
     }
     Navigator.of(context).pop();
   }
 
   Widget _linkButton() {
-    return switch (widget.controller.linkStateFor(widget.device.identifier)) {
+    return switch (controller.linkStateFor(device.identifier)) {
       LinkState.connected => const FilledButton.tonal(
         onPressed: null,
         child: Text('연결됨'),
@@ -520,144 +386,35 @@ class _DeviceControlPageState extends State<DeviceControlPage>
         ),
       ),
       LinkState.disconnected || LinkState.pairingLost => FilledButton.tonal(
-        onPressed: () {
-          widget.controller.connectDevice(
-            widget.device.identifier,
-            pair: true,
-          );
-        },
+        onPressed: () => controller.connectDevice(device.identifier, pair: true),
         child: const Text('연결'),
       ),
     };
   }
 
-  @override
-  Widget build(BuildContext context) {
-    final isConnected = widget.controller.connectedDeviceIds.contains(
-      widget.device.identifier,
-    );
-    final messages =
-        widget.controller.messagesByDevice[widget.device.identifier] ??
-        <BleMessage>[];
-    final name = widget.device.name.isEmpty ? widget.device.identifier : widget.device.name;
-    final linkLabel = widget.controller.linkLabel(widget.device.identifier);
-    final compact =
-        MediaQuery.sizeOf(context).height - MediaQuery.viewInsetsOf(context).bottom <
-        _compactHeight;
+  Widget _buildPage(BuildContext context) {
+    final isConnected = controller.connectedDeviceIds.contains(device.identifier);
     return Scaffold(
       appBar: AppBar(
-        title: compact
-            ? Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(name),
-                  Text(linkLabel, style: Theme.of(context).textTheme.bodySmall),
-                ],
-              )
-            : Text(name),
+        title: Text(device.name.isEmpty ? device.identifier : device.name),
         actions: [
-          if (compact) _linkButton(),
-          if (widget.controller.isKnownDevice(widget.device.identifier))
+          if (controller.isKnownDevice(device.identifier))
             IconButton(
               tooltip: '기기 삭제',
               icon: const Icon(Icons.delete_outline),
-              onPressed: _confirmRemove,
+              onPressed: () => _confirmRemove(context),
             ),
         ],
       ),
-      body: Column(
+      body: ListView(
         children: [
-          if (!compact) ...[
-            ListTile(
-              leading: Icon(
-                isConnected ? Icons.bluetooth_connected : Icons.bluetooth_disabled,
-              ),
-              title: Text(linkLabel),
-              subtitle: Text(widget.device.identifier),
-              trailing: _linkButton(),
+          ListTile(
+            leading: Icon(
+              isConnected ? Icons.bluetooth_connected : Icons.bluetooth_disabled,
             ),
-            const Divider(height: 1),
-          ],
-          Expanded(
-            child: ListView.builder(
-              reverse: true,
-              itemCount: messages.length,
-              itemBuilder: (context, index) {
-                final message = messages[messages.length - 1 - index];
-                final failed = message.status == MessageStatus.failed;
-                return ListTile(
-                  title: Text(message.text),
-                  subtitle: Text(
-                    '${message.statusLabel} · ${message.timestamp.toLocal()}',
-                    style: failed
-                        ? TextStyle(color: Theme.of(context).colorScheme.error)
-                        : null,
-                  ),
-                  trailing: switch (message.status) {
-                    MessageStatus.sending => const SizedBox.square(
-                      dimension: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    ),
-                    MessageStatus.failed => Icon(
-                      Icons.error_outline,
-                      color: Theme.of(context).colorScheme.error,
-                    ),
-                    MessageStatus.sent => null,
-                  },
-                );
-              },
-            ),
-          ),
-          SafeArea(
-            top: false,
-            child: Padding(
-              padding: compact
-                  ? const EdgeInsets.symmetric(horizontal: 12, vertical: 4)
-                  : const EdgeInsets.all(12),
-              child: ValueListenableBuilder<TextEditingValue>(
-                valueListenable: _textController,
-                builder: (context, value, _) {
-                  final text = value.text.trim();
-                  final bytes = utf8.encode(text).length;
-                  final tooLong = bytes > maxMessageBytes;
-                  return Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Expanded(
-                        child: TextField(
-                          controller: _textController,
-                          decoration: InputDecoration(
-                            border: const OutlineInputBorder(),
-                            isDense: compact,
-                            hintText: '메시지 입력',
-                            // Shown close to the limit, so it doesn't come as a surprise.
-                            counterText: bytes > maxMessageBytes * 0.8
-                                ? '$bytes/$maxMessageBytes bytes'
-                                : null,
-                            errorText: tooLong ? '메시지가 너무 깁니다' : null,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      IconButton.filled(
-                        onPressed: text.isEmpty || tooLong
-                            ? null
-                            : () async {
-                                final message = _textController.text.trim();
-                                _textController.clear();
-                                await widget.controller.sendMessage(
-                                  widget.device.identifier,
-                                  message,
-                                );
-                              },
-                        icon: const Icon(Icons.send),
-                      ),
-                    ],
-                  );
-                },
-              ),
-            ),
+            title: Text(controller.linkLabel(device.identifier)),
+            subtitle: Text(device.identifier),
+            trailing: _linkButton(),
           ),
         ],
       ),
@@ -736,15 +493,13 @@ class BleAppController extends ChangeNotifier {
 
   /// Whether the user turned notifications off. Android only, and not part of
   /// [permissionsGranted]: without them the app still works, but the user
-  /// isn't told about messages that arrive while it's in the background.
+  /// isn't told about requests that arrive while it's in the background.
   bool notificationsDenied = false;
   bool _requestingPermissions = false;
 
   final List<BleDevice> discoveredDevices = <BleDevice>[];
   final List<BleDevice> registeredDevices = <BleDevice>[];
   final Set<String> connectedDeviceIds = <String>{};
-  final Map<String, List<BleMessage>> messagesByDevice = <String, List<BleMessage>>{};
-  final Map<String, int> unreadCountByDevice = <String, int>{};
 
   List<BleDevice> get allKnownDevices {
     final map = <String, BleDevice>{};
@@ -766,30 +521,6 @@ class BleAppController extends ChangeNotifier {
       );
     });
     return list;
-  }
-
-  List<BleDevice> get devicesWithUnreadMessages {
-    return allKnownDevices
-        .where((device) => (unreadCountByDevice[device.identifier] ?? 0) > 0)
-        .toList();
-  }
-
-  List<MessageHistoryEntry> get messageHistory {
-    final history = <MessageHistoryEntry>[];
-    messagesByDevice.forEach((deviceId, messages) {
-      final device = _deviceById(deviceId);
-      for (final message in messages) {
-        history.add(
-          MessageHistoryEntry(
-            deviceId: deviceId,
-            deviceName: device.name,
-            message: message,
-          ),
-        );
-      }
-    });
-    history.sort((a, b) => b.message.timestamp.compareTo(a.message.timestamp));
-    return history;
   }
 
   /// Permissions the native side needs before it can advertise, scan, or connect.
@@ -1011,8 +742,7 @@ class BleAppController extends ChangeNotifier {
       registeredDevices.any((d) => d.identifier == deviceId);
 
   /// Forgets a device: it leaves the registered list (so it's no longer
-  /// connected automatically), its messages are cleared, and any live link is
-  /// dropped. An OS-level pairing stays; only the system Bluetooth settings can
+  /// connected automatically), and any live link is dropped. An OS-level pairing stays; only the system Bluetooth settings can
   /// remove it. If the peer connects to us again, it gets registered again.
   Future<void> removeDevice(String deviceId) async {
     registeredDevices.removeWhere((d) => d.identifier == deviceId);
@@ -1020,9 +750,6 @@ class BleAppController extends ChangeNotifier {
     if (_pairingLostDeviceIds.remove(deviceId)) {
       unawaited(_savePairingLost());
     }
-    messagesByDevice.remove(deviceId);
-    unreadCountByDevice.remove(deviceId);
-    _messagesChanged();
     // Save before disconnecting: the Android service reads this list to decide
     // whether to reconnect a dropped device.
     await _saveRegisteredDevices();
@@ -1035,82 +762,6 @@ class BleAppController extends ChangeNotifier {
     await _saveRegisteredDevices();
     notifyListeners();
   }
-
-  int _messageCounter = 0;
-
-  /// Shows the message right away as [MessageStatus.sending]; the native
-  /// messageSent/messageFailed event for its id settles the status.
-  Future<void> sendMessage(String deviceId, String text) async {
-    final message = BleMessage(
-      id: '${DateTime.now().microsecondsSinceEpoch}-${_messageCounter++}',
-      text: text,
-      timestamp: DateTime.now(),
-      outgoing: true,
-      status: MessageStatus.sending,
-    );
-    _appendMessage(deviceId, message);
-    _messagesChanged();
-    notifyListeners();
-    final accepted = await _invoke('sendMessage', {
-      'deviceId': deviceId,
-      'message': text,
-      'messageId': message.id,
-    });
-    if (!accepted && message.status == MessageStatus.sending) {
-      message
-        ..status = MessageStatus.failed
-        ..error = lastError;
-      _messagesChanged();
-      notifyListeners();
-    }
-  }
-
-  void _settleMessage(Map<String, dynamic> event, MessageStatus status) {
-    final messageId = event['messageId'] as String?;
-    final candidates = switch (event['deviceId'] as String?) {
-      final String deviceId => messagesByDevice[deviceId] ?? const <BleMessage>[],
-      null => messagesByDevice.values.expand((messages) => messages),
-    };
-    for (final message in candidates) {
-      if (message.outgoing && message.id == messageId) {
-        message
-          ..status = status
-          ..error = event['error'] as String?;
-        _messagesChanged();
-        return;
-      }
-    }
-  }
-
-  String? _openChatDeviceId;
-
-  /// Called by the chat page while it's open. Its messages don't count as unread
-  /// while the app is in the foreground. Doesn't notify listeners (it's called
-  /// from initState); opening a chat from the list clears the unread count.
-  void openChat(String deviceId) => _openChatDeviceId = deviceId;
-
-  void closeChat(String deviceId) {
-    if (_openChatDeviceId == deviceId) {
-      _openChatDeviceId = null;
-    }
-  }
-
-  bool _isBeingRead(String deviceId) {
-    final state = WidgetsBinding.instance.lifecycleState;
-    return deviceId == _openChatDeviceId &&
-        (state == null || state == AppLifecycleState.resumed);
-  }
-
-  void clearUnreadForDevice(String deviceId) {
-    if ((unreadCountByDevice[deviceId] ?? 0) == 0) {
-      return;
-    }
-    unreadCountByDevice.remove(deviceId);
-    _messagesChanged();
-    notifyListeners();
-  }
-
-  int unreadCountFor(String deviceId) => unreadCountByDevice[deviceId] ?? 0;
 
   Future<bool> _invoke(String method, [Map<String, dynamic>? arguments]) async {
     try {
@@ -1125,11 +776,6 @@ class BleAppController extends ChangeNotifier {
     }
     notifyListeners();
     return false;
-  }
-
-  void _appendMessage(String deviceId, BleMessage message) {
-    final messages = messagesByDevice.putIfAbsent(deviceId, () => <BleMessage>[]);
-    messages.add(message);
   }
 
   BleDevice _deviceById(String deviceId) {
@@ -1219,35 +865,6 @@ class BleAppController extends ChangeNotifier {
           _bondingDeviceIds.add(id);
         }
         break;
-      case 'message':
-        final id = event['deviceId'] as String?;
-        final message = event['message'] as String?;
-        if (id != null && message != null) {
-          // Messages that waited natively while no listener was attached carry the
-          // time they actually arrived.
-          final receivedAt = event['receivedAt'] as int?;
-          _appendMessage(
-            id,
-            BleMessage(
-              text: message,
-              timestamp: receivedAt == null
-                  ? DateTime.now()
-                  : DateTime.fromMillisecondsSinceEpoch(receivedAt),
-              outgoing: false,
-            ),
-          );
-          if (!_isBeingRead(id)) {
-            unreadCountByDevice[id] = (unreadCountByDevice[id] ?? 0) + 1;
-          }
-          _messagesChanged();
-        }
-        break;
-      case 'messageSent':
-        _settleMessage(event, MessageStatus.sent);
-        break;
-      case 'messageFailed':
-        _settleMessage(event, MessageStatus.failed);
-        break;
       case 'error':
         if (event['message'] case final String message) {
           _reportError(message);
@@ -1279,68 +896,18 @@ class BleAppController extends ChangeNotifier {
           );
       }
     }
-    // initialize() can run again (permission retry); the in-memory history is newer
-    // than what's stored by then, and may hold messages still being sent.
-    if (!_messagesLoaded) {
-      _messagesLoaded = true;
-      _loadMessages(prefs);
+    // initialize() can run again (permission retry); the in-memory state is newer
+    // than what's stored by then.
+    if (!_stateLoaded) {
+      _stateLoaded = true;
       _pairingLostDeviceIds.addAll(prefs.getStringList(_prefsPairingLost) ?? const []);
-    }
-  }
-
-  bool _messagesLoaded = false;
-
-  void _loadMessages(SharedPreferences prefs) {
-    final messagesJson = prefs.getString(_prefsMessages);
-    if (messagesJson != null) {
-      final raw = jsonDecode(messagesJson);
-      if (raw is Map) {
-        raw.forEach((deviceId, items) {
-          if (deviceId is! String || items is! List) {
-            return;
-          }
-          messagesByDevice[deviceId] = [
-            for (final item in items.whereType<Map>())
-              BleMessage.fromJson(item.cast<String, dynamic>()),
-          ];
-        });
-      }
-    }
-    final unreadJson = prefs.getString(_prefsUnreadCounts);
-    if (unreadJson != null) {
-      final raw = jsonDecode(unreadJson);
-      if (raw is Map) {
-        raw.forEach((deviceId, count) {
-          if (deviceId is String && count is int) {
-            unreadCountByDevice[deviceId] = count;
-          }
-        });
+      for (final key in _obsoletePrefs) {
+        unawaited(prefs.remove(key));
       }
     }
   }
 
-  void _messagesChanged() => unawaited(_saveMessages());
-
-  Future<void> _saveMessages() async {
-    final prefs = _prefs;
-    if (prefs == null) {
-      return;
-    }
-    await prefs.setString(
-      _prefsMessages,
-      jsonEncode({
-        for (final MapEntry(key: deviceId, value: messages)
-            in messagesByDevice.entries)
-          deviceId: [
-            for (final message in messages.length > _storedMessagesPerDevice
-                ? messages.sublist(messages.length - _storedMessagesPerDevice)
-                : messages)
-              message.toJson(),
-          ],
-      }),
-    );
-    await prefs.setString(_prefsUnreadCounts, jsonEncode(unreadCountByDevice));
-  }
+  bool _stateLoaded = false;
 
   Future<void> _saveRegisteredDevices() async {
     await _prefs?.setString(
@@ -1418,80 +985,3 @@ class BleStatus {
 }
 
 enum LinkState { disconnected, connecting, bonding, connected, pairingLost }
-
-enum MessageStatus {
-  /// Handed to native code, waiting for its messageSent/messageFailed event.
-  sending,
-
-  /// Accepted by the peer's stack (write response or notification sent).
-  /// Received messages are always in this state.
-  sent,
-  failed,
-}
-
-class BleMessage {
-  BleMessage({
-    required this.text,
-    required this.timestamp,
-    required this.outgoing,
-    this.id = '',
-    this.status = MessageStatus.sent,
-    this.error,
-  });
-
-  /// Restores a stored message. One stored while it was still being sent comes
-  /// back as failed: the app stopped before native code reported the outcome.
-  factory BleMessage.fromJson(Map<String, dynamic> json) {
-    final status = MessageStatus.values.asNameMap()[json['status']] ??
-        MessageStatus.sent;
-    final interrupted = status == MessageStatus.sending;
-    return BleMessage(
-      id: json['id'] as String? ?? '',
-      text: json['text'] as String? ?? '',
-      timestamp: DateTime.fromMillisecondsSinceEpoch(json['timestamp'] as int? ?? 0),
-      outgoing: json['outgoing'] as bool? ?? false,
-      status: interrupted ? MessageStatus.failed : status,
-      error: interrupted ? '앱이 종료되어 전송 결과를 알 수 없습니다' : json['error'] as String?,
-    );
-  }
-
-  Map<String, dynamic> toJson() => <String, dynamic>{
-    'id': id,
-    'text': text,
-    'timestamp': timestamp.millisecondsSinceEpoch,
-    'outgoing': outgoing,
-    'status': status.name,
-    if (error != null) 'error': error,
-  };
-
-  /// Identifies an outgoing message in native messageSent/messageFailed events.
-  final String id;
-  final String text;
-  final DateTime timestamp;
-  final bool outgoing;
-  MessageStatus status;
-  String? error;
-
-  String get statusLabel {
-    if (!outgoing) {
-      return 'Received';
-    }
-    return switch (status) {
-      MessageStatus.sending => '전송 중',
-      MessageStatus.sent => 'Sent',
-      MessageStatus.failed => '전송 실패: ${error ?? '알 수 없는 오류'}',
-    };
-  }
-}
-
-class MessageHistoryEntry {
-  MessageHistoryEntry({
-    required this.deviceId,
-    required this.deviceName,
-    required this.message,
-  });
-
-  final String deviceId;
-  final String deviceName;
-  final BleMessage message;
-}
