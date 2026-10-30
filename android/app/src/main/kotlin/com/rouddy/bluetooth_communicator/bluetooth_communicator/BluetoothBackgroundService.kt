@@ -82,7 +82,9 @@ class BluetoothBackgroundService : Service(), BleTransport {
     private val idleClients = ConcurrentHashMap<String, BluetoothGatt>()
 
     // Addresses the user asked to connect to (the 연결 button). Only those links may
-    // start an app pairing (6.3); cleared when the link comes up or the attempt ends.
+    // start an app pairing (6.3). Kept for the whole connection, since the peer
+    // re-registering its GATT server (onServiceChanged) restarts the handshake on it;
+    // cleared once a session is up or the connection ends.
     private val userInitiated = ConcurrentHashMap.newKeySet<String>()
     // connectGatt() calls that haven't connected yet, kept so they can be cancelled. A
     // pending autoConnect would otherwise complete whenever the device shows up again.
@@ -612,7 +614,7 @@ class BluetoothBackgroundService : Service(), BleTransport {
         val linkId = nextLinkId++
         clientLinkIds[address] = linkId
         linkTargets[linkId] = LinkTarget(address, Role.CENTRAL)
-        engine.linkUp(linkId, Role.CENTRAL, address, Frames.frameSize(attMtu(address)), userInitiated.remove(address))
+        engine.linkUp(linkId, Role.CENTRAL, address, Frames.frameSize(attMtu(address)), userInitiated.contains(address))
     }
 
     private fun serverLinkUp(address: String) {
@@ -703,6 +705,9 @@ class BluetoothBackgroundService : Service(), BleTransport {
     }
 
     override fun onEngineEvent(event: EngineEvent) {
+        if (event is EngineEvent.Connected) {
+            userInitiated.remove(event.deviceId)
+        }
         if (event is EngineEvent.Disconnected) {
             // The link an idle client was kept for ended; reuse the client or let go.
             handler.post { releaseIdleClient(event.deviceId) }
