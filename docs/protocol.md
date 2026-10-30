@@ -1,8 +1,7 @@
 # BLE 메시지 프로토콜 v1
 
-> 상태: **Android에 구현했습니다**(14절의 1–5단계와 7단계). 6단계(`/control/media`)와 iOS는 아직입니다. 관련 TODO: 23번.
+> 상태: **Android와 iOS에 구현했습니다**(14절의 1–5단계, Android는 7단계도). 6단계(`/control/media`)는 아직입니다. 관련 TODO: 23번.
 > 구현하면서 기기에서 확인한 내용을 반영해 원래 설계에서 바뀐 곳이 있습니다. 4절(조각 최대 512바이트), 9절(연결된 링크가 살아 있는지 확인), 10절(`/ping`), 12절(확정된 채널 계약)입니다.
-> iOS 빌드는 아직 예전 방식(UTF-8 바이트를 write/notify 한 번으로 보냄, 예전 characteristic)이라 새 Android 빌드와 통신하지 못합니다.
 
 ## 1. 목표와 범위
 
@@ -416,7 +415,8 @@ parcelable PeerInfo { String peerId; String name; boolean connected; }
 - `connectDevice{pair: true}`: OS 페어링을 허용하는 것에 더해, 그 링크에서 PAIR_REQUEST를 보내도 된다는 뜻입니다(6.3).
 - 새 이벤트: `peers{peers}`(앱 페어링한 peer 전체 목록, 네이티브가 관리), `pairingRequest{deviceId, peerId, name, code, repair}`(양쪽 모두), `pairingResult{deviceId, peerId, result}`, `peerRejected{deviceId, reason, byPeer}`(REJECT reason, 6.5), `peerUnpaired{deviceId}`
 - 새 메서드: `respondPairing{deviceId, accept}`, `removeDevice{deviceId}`(지금의 `disconnectDevice`를 대신하고, UNPAIR를 보내고 K를 지움)
-- 아직 없음: `setDeviceName{name}`(iOS), 미디어 조작 메서드
+- `setDeviceName{name}`(iOS): 기본값은 `UIDevice.current.name`("iPhone")
+- 아직 없음: 미디어 조작 메서드
 
 ## 13. 보안 범위
 
@@ -455,7 +455,7 @@ parcelable PeerInfo { String peerId; String name; boolean connected; }
 ## 15. 미정 / 구현하면서 확인할 것
 
 - 미디어 키를 보낸 뒤 `isMusicActive()`에 반영되기까지 걸리는 시간
-- iOS에서 같은 기기가 central일 때와 peripheral일 때 identifier가 같은지. 같다면 iOS에서도 deviceId로 두 번째 연결을 미리 막을 수 있습니다(9절)
+- ~~iOS에서 같은 기기가 central일 때와 peripheral일 때 identifier가 같은지~~ 같습니다(S23을 `CBPeripheral`로 볼 때와 `CBCentral`로 볼 때 같은 UUID). 그래서 iOS에서도 deviceId로 두 번째 연결을 미리 막을 수 있습니다(9절). 아직 하지 않았고, peerId로 정합니다
 - iOS 승인 화면: 지금은 포그라운드일 때만 가능합니다. 알림 흐름이 생기면 백그라운드에서도 받을 수 있습니다
 - 서명 키 교체(APK Signature Scheme v3 rotation): v1은 현재 서명자만 비교합니다. 한쪽만 업데이트되면 두 폰의 해시가 달라져 `DENIED`가 됩니다
 - ~~Keystore HMAC 키 가져오기(`KeyProtection`)가 대상 기기(Samsung 등)에서 문제 없는지~~ Galaxy Z Fold5, S23(Android 17)에서 문제 없음. 실패하면 앱 prefs에 저장하고 로그를 남깁니다

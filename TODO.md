@@ -209,7 +209,8 @@
 - 확인: Jump3(Samsung)에서 Bluetooth를 꺼도 어댑터는 `BLE_ON` 상태로 남아서, 앱의 광고 세트가 계속 동작했습니다. 그런데 앱은 7번 수정대로 callback 참조만 버렸고, 다시 켜면 새 광고를 시작했습니다. 그 결과 광고 세트가 2개가 됐고(같은 폰이 주소 두 개로 보임), 예전 광고는 멈출 방법이 없었습니다.
 - 해결: Bluetooth가 꺼질 때, 아직 접근할 수 있는 advertiser와 scanner로 광고와 스캔을 실제로 멈춘 뒤 참조를 버립니다. Jump3에서 두 번 껐다 켜는 동안 광고 세트 수가 1 → 0 → 1로 유지되는 것을 확인했습니다.
 
-### 31. iOS가 새 프로토콜을 구현하지 않음 `코드`
+### 31. iOS가 새 프로토콜을 구현하지 않음 `코드` ✅ 해결
+- 해결(2026-10-30): 코덱, 암호(CryptoKit), `ProtocolEngine`을 Swift로 옮기고(`ios/Runner/Protocol`), `IOSBleBackgroundManager`가 CoreBluetooth로 프레임을 나릅니다. peerId와 K는 Keychain(`IOSPeerStore`)에 둡니다. 두 플랫폼은 `test_vectors/protocol_v1.json`을 같이 검사합니다. AlgorigoSE ↔ S23/Fold5에서 양방향 앱 페어링, 앱 재시작·Bluetooth 껐다 켜기 후 재연결, UNPAIR 수신을 확인했습니다. iPhone에서 삭제(UNPAIR 보내기)는 기기에서 아직 확인하지 못했습니다.
 - `AppDelegate.swift`는 아직 예전 방식(UTF-8 바이트 그대로, 예전 characteristic `DB912050-…`)이라 새 Android 빌드와 통신하지 못합니다. 새 채널 메서드(`removeDevice`, `respondPairing`)와 이벤트(`peers`, `pairingRequest` 등)도 없습니다.
 - 수정 방향: 코덱, 암호(CryptoKit), `ProtocolEngine`을 Swift로 옮기고, Kotlin JVM 테스트와 같은 테스트 벡터로 확인합니다(docs/protocol.md 14절 1단계). iOS는 AIDL이 없으므로 `IBleCommunicator`에 해당하는 부분은 없습니다. 승인 화면은 포그라운드에서만 띄울 수 있으므로 백그라운드에서는 REJECT(CANNOT_PROMPT)입니다.
 
