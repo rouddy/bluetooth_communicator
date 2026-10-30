@@ -40,9 +40,11 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.ParcelUuid
 import android.os.SystemClock
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.rouddy.bluetooth_communicator.bluetooth_communicator.protocol.EngineEvent
+import com.rouddy.bluetooth_communicator.bluetooth_communicator.protocol.Frames
 import com.rouddy.bluetooth_communicator.bluetooth_communicator.protocol.Role
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -610,7 +612,7 @@ class BluetoothBackgroundService : Service(), BleTransport {
         val linkId = nextLinkId++
         clientLinkIds[address] = linkId
         linkTargets[linkId] = LinkTarget(address, Role.CENTRAL)
-        engine.linkUp(linkId, Role.CENTRAL, address, attMtu(address) - ATT_HEADER_SIZE, userInitiated.remove(address))
+        engine.linkUp(linkId, Role.CENTRAL, address, Frames.frameSize(attMtu(address)), userInitiated.remove(address))
     }
 
     private fun serverLinkUp(address: String) {
@@ -620,7 +622,7 @@ class BluetoothBackgroundService : Service(), BleTransport {
         val linkId = nextLinkId++
         serverLinkIds[address] = linkId
         linkTargets[linkId] = LinkTarget(address, Role.PERIPHERAL)
-        engine.linkUp(linkId, Role.PERIPHERAL, address, attMtu(address) - ATT_HEADER_SIZE, false)
+        engine.linkUp(linkId, Role.PERIPHERAL, address, Frames.frameSize(attMtu(address)), false)
     }
 
     // The ATT MTU belongs to the Bluetooth connection, which both roles share. A
@@ -636,7 +638,12 @@ class BluetoothBackgroundService : Service(), BleTransport {
             handler.post { engine.frameWritten(linkId, false) }
             return
         }
-        val done: (Boolean, String?) -> Unit = { success, _ -> handler.post { engine.frameWritten(linkId, success) } }
+        val done: (Boolean, String?) -> Unit = { success, error ->
+            if (!success) {
+                Log.w(TAG, "Frame to ${target.address} (${target.role}) failed: $error")
+            }
+            handler.post { engine.frameWritten(linkId, success) }
+        }
         when (target.role) {
             Role.CENTRAL -> {
                 val gatt = activeConnections[target.address]
@@ -958,8 +965,8 @@ class BluetoothBackgroundService : Service(), BleTransport {
                     return@post
                 }
                 clientMtus[address] = mtu
-                clientLinkIds[address]?.let { engine.setMaxFrameSize(it, mtu - ATT_HEADER_SIZE) }
-                serverLinkIds[address]?.let { engine.setMaxFrameSize(it, mtu - ATT_HEADER_SIZE) }
+                clientLinkIds[address]?.let { engine.setMaxFrameSize(it, Frames.frameSize(mtu)) }
+                serverLinkIds[address]?.let { engine.setMaxFrameSize(it, Frames.frameSize(mtu)) }
                 if (!writableCharacteristics.containsKey(address)) {
                     gatt.discoverServices()
                 }
@@ -1253,8 +1260,8 @@ class BluetoothBackgroundService : Service(), BleTransport {
             val address = device.address ?: return
             handler.post {
                 centralMtus[address] = mtu
-                serverLinkIds[address]?.let { engine.setMaxFrameSize(it, mtu - ATT_HEADER_SIZE) }
-                clientLinkIds[address]?.let { engine.setMaxFrameSize(it, mtu - ATT_HEADER_SIZE) }
+                serverLinkIds[address]?.let { engine.setMaxFrameSize(it, Frames.frameSize(mtu)) }
+                clientLinkIds[address]?.let { engine.setMaxFrameSize(it, Frames.frameSize(mtu)) }
             }
         }
 
@@ -1375,11 +1382,11 @@ class BluetoothBackgroundService : Service(), BleTransport {
             UUID.fromString("002069ac-115d-4391-8772-13e44df757fc")
         private const val DEFAULT_ATT_MTU = 23
         private const val MAX_ATT_MTU = 517
-        private const val ATT_HEADER_SIZE = 3
         private const val SCAN_RETRY_DELAY_MS = 30_000L
         private const val SCAN_MODE_DEBOUNCE_MS = 2_000L
         private const val NEARBY_REFRESH_MS = 30_000L
         private const val AUTO_CONNECT_INTERVAL_MS = 10_000L
+        private const val TAG = "BleService"
         private val CLIENT_CONFIG_DESCRIPTOR_UUID =
             UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
     }

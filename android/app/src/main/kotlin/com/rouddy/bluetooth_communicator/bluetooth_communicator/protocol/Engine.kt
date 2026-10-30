@@ -389,13 +389,14 @@ class ProtocolEngine(
 
     /**
      * A link became usable: for a central, its CCCD subscription succeeded; for a
-     * peripheral, the central subscribed. [maxFrameSize] is ATT MTU - 3.
+     * peripheral, the central subscribed. [maxFrameSize] is ATT MTU - 3 (capped at
+     * [Frames.MAX_FRAME_SIZE]).
      */
     fun linkUp(linkId: Int, role: Role, deviceId: String, maxFrameSize: Int, userInitiated: Boolean) {
         links.remove(linkId)?.let(::teardown)
-        val link = Link(linkId, role, deviceId, userInitiated, maxFrameSize.coerceAtLeast(Frames.MIN_FRAME_SIZE))
+        val link = Link(linkId, role, deviceId, userInitiated, maxFrameSize.coerceIn(Frames.MIN_FRAME_SIZE, Frames.MAX_FRAME_SIZE))
         links[linkId] = link
-        host.log("Link $linkId up: $role to $deviceId, frames of $maxFrameSize bytes, user=$userInitiated")
+        host.log("Link $linkId up: $role to $deviceId, frames of ${link.maxFrameSize} bytes, user=$userInitiated")
         if (role == Role.CENTRAL) {
             sendHello(link)
         } else {
@@ -407,7 +408,7 @@ class ProtocolEngine(
 
     /** The ATT MTU changed; frames split from now on use the new size. */
     fun setMaxFrameSize(linkId: Int, maxFrameSize: Int) {
-        links[linkId]?.maxFrameSize = maxFrameSize.coerceAtLeast(Frames.MIN_FRAME_SIZE)
+        links[linkId]?.maxFrameSize = maxFrameSize.coerceIn(Frames.MIN_FRAME_SIZE, Frames.MAX_FRAME_SIZE)
     }
 
     fun frameReceived(linkId: Int, frame: ByteArray) {

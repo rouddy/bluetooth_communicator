@@ -230,6 +230,19 @@ class EngineTest {
     }
 
     @Test
+    fun `frames stay within an attribute value even with the largest MTU`() {
+        network.maxFrameSize = 514 // ATT MTU 517 - 3
+        pair()
+        val payload = ByteArray(3_000) { it.toByte() }
+
+        val results = a.send(b, payload)
+        settle(5_000)
+
+        assertEquals(listOf(DeliveryStatus.OK), results)
+        assertArrayEquals(payload, b.delivered.single().payload)
+    }
+
+    @Test
     fun `a message over the peer's maximum fails locally with TOO_LARGE`() {
         pair()
 

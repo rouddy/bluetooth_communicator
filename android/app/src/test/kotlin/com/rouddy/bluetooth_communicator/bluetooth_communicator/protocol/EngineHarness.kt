@@ -185,7 +185,8 @@ class Network(private val scheduler: FakeScheduler) {
     fun write(from: Phone, linkId: Int, frame: ByteArray) {
         val connection = find(from, linkId)
         scheduler.schedule(1) {
-            if (!connection.open) {
+            // Like Android's GATT: an attribute value over 512 bytes is rejected.
+            if (!connection.open || frame.size > Frames.MAX_FRAME_SIZE) {
                 from.engine.frameWritten(linkId, false)
                 return@schedule
             }

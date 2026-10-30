@@ -17,6 +17,15 @@ object Frames {
     /** Smallest frame size that still fits a first frame's header and a data byte. */
     const val MIN_FRAME_SIZE = 6
 
+    /**
+     * Largest frame: an ATT attribute value is at most 512 bytes, so even with an MTU
+     * of 517 a 514-byte write is rejected (invalid attribute value length).
+     */
+    const val MAX_FRAME_SIZE = 512
+
+    /** The frame size for a link with [attMtu]: MTU - 3, at most [MAX_FRAME_SIZE]. */
+    fun frameSize(attMtu: Int) = (attMtu - 3).coerceIn(MIN_FRAME_SIZE, MAX_FRAME_SIZE)
+
     /** Splits [record] into frames of at most [maxFrameSize] bytes (the link's ATT MTU - 3). */
     fun split(record: ByteArray, tid: Int, maxFrameSize: Int): List<ByteArray> {
         require(tid in 0 until TID_COUNT) { "tid $tid out of range" }
