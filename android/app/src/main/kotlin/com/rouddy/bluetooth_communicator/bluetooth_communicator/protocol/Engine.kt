@@ -190,6 +190,10 @@ class ProtocolEngine(
         const val MAX_IN_FLIGHT = 4
         const val MAX_DECRYPT_FAILURES = 5
         const val RETRY_DELAY_MS = 1_000L
+        const val PROBE_TIMEOUT_MS = 3_000L
+
+        /** A built-in path that only gets an ACK: proof that a link is alive. */
+        const val PING_PATH = "/ping"
         private const val MAX_COUNTER = 0xFFFF_FFFFL
 
         /** SEALED header and tag around an envelope. */
@@ -253,6 +257,12 @@ class ProtocolEngine(
         var session: Session? = null
         var handshakeTimer: Cancellable? = null
         var closed = false
+
+        /** HELLOs received; a deferred decision about an older HELLO is dropped. */
+        var helloCount = 0
+
+        /** `/ping` msgIds waiting for their ACK. */
+        val probes = HashMap<Long, () -> Unit>()
 
         val peerId: PeerId?
             get() = peerHello?.peerId
@@ -385,6 +395,7 @@ class ProtocolEngine(
         links.remove(linkId)?.let(::teardown)
         val link = Link(linkId, role, deviceId, userInitiated, maxFrameSize.coerceAtLeast(Frames.MIN_FRAME_SIZE))
         links[linkId] = link
+        host.log("Link $linkId up: $role to $deviceId, frames of $maxFrameSize bytes, user=$userInitiated")
         if (role == Role.CENTRAL) {
             sendHello(link)
         } else {
@@ -460,6 +471,7 @@ class ProtocolEngine(
     }
 
     private fun teardown(link: Link) {
+        host.log("Link ${link.id} to ${link.deviceId} down (${link.phase})")
         link.closed = true
         link.handshakeTimer?.cancel()
         link.pairing?.let { pairing ->
@@ -571,6 +583,8 @@ class ProtocolEngine(
             host.log("Ignored a HELLO with this phone's own peerId")
             return
         }
+        link.helloCount++
+        host.log("HELLO from ${link.deviceId} (${hello.peerId}, ${hello.name}) on link ${link.id} in ${link.phase}")
         when (link.role) {
             Role.PERIPHERAL -> {
                 // A new HELLO_c restarts the handshake, e.g. the peer app restarted (6.5).
@@ -582,15 +596,14 @@ class ProtocolEngine(
                     reject(link, RejectReason.UNSUPPORTED_VERSION)
                     return
                 }
-                if (losesToOtherLink(link)) {
-                    return
+                resolveOtherLink(link) {
+                    val own = ownHello()
+                    link.ownHello = own
+                    link.tHello = Derivation.tHello(bytes, own)
+                    link.phase = Phase.AWAIT_AUTH
+                    sendRecord(link, own, PRIORITY_HANDSHAKE)
+                    armHandshakeTimer(link)
                 }
-                val own = ownHello()
-                link.ownHello = own
-                link.tHello = Derivation.tHello(bytes, own)
-                link.phase = Phase.AWAIT_AUTH
-                sendRecord(link, own, PRIORITY_HANDSHAKE)
-                armHandshakeTimer(link)
             }
             Role.CENTRAL -> {
                 if (link.phase == Phase.DONE) {
@@ -608,10 +621,7 @@ class ProtocolEngine(
                     reject(link, RejectReason.UNSUPPORTED_VERSION)
                     return
                 }
-                if (losesToOtherLink(link)) {
-                    return
-                }
-                continueAsCentral(link)
+                resolveOtherLink(link) { continueAsCentral(link) }
             }
         }
     }
@@ -637,6 +647,7 @@ class ProtocolEngine(
         val peerId = link.peerId!!
         val stored = store.peers().firstOrNull { it.peerId == peerId }
         val key = store.key(peerId)
+        host.log("Central on link ${link.id}: key=${key != null}, state=${stored?.state}, user=${link.userInitiated}")
         when {
             key != null && (stored?.state == PeerState.PAIRED || !link.userInitiated) -> sendAuth(link, key)
             link.userInitiated -> {
@@ -727,6 +738,7 @@ class ProtocolEngine(
     }
 
     private fun handshakeEnded(link: Link, reason: Int, byPeer: Boolean) {
+        host.log("Handshake on link ${link.id} ended: ${RejectReason.name(reason)}${if (byPeer) " from the peer" else ""}")
         link.handshakeTimer?.cancel()
         val pairing = link.pairing
         link.pairing = null
@@ -770,6 +782,7 @@ class ProtocolEngine(
             return
         }
         val pairing = Pairing(repair = store.key(link.peerId!!) != null)
+        host.log("Pairing requested on link ${link.id} (repair=${pairing.repair})")
         val keyPair = Crypto.generateEcKeyPair(random)
         pairing.keyPair = keyPair
         link.pairing = pairing
@@ -886,36 +899,91 @@ class ProtocolEngine(
     // ---------------------------------------------------------------- one link per peer (9절)
 
     /**
-     * Called once [link] knows its peer (from its HELLO). If another live link to the
-     * same peer exists, one of them goes; returns whether that's [link].
+     * Called once [link] knows its peer (from its HELLO): if another live link to the
+     * same peer exists, one of them goes. [proceed] continues [link]'s handshake if it
+     * stays, possibly later.
      *
      * Each phone decides when the second of its two links learns the peer, so the
      * loser is always still handshaking and can be dropped cleanly: its central
-     * closes it, or its peripheral answers REJECT(ALREADY_CONNECTED). The phones can
-     * disagree when one already sees the first link as established; then both links
-     * go, and the automatic reconnect makes a new one (9절).
+     * closes it, or its peripheral answers REJECT(ALREADY_CONNECTED).
+     *
+     * - The other link is handshaking too: both phones keep the link whose central is
+     *   the lower peerId, so they agree without talking.
+     * - The other link is established: it stays if it's alive, which a `/ping`
+     *   answers. When the peer's app restarted while Bluetooth stayed connected
+     *   (other apps hold the connection, e.g. Samsung's), nothing reports the old
+     *   session as gone, and turning the new link away would lock the peer out.
+     *
+     * The phones can disagree when one already sees the first link as established;
+     * then both links go, and the automatic reconnect makes a new one (9절).
      */
-    private fun losesToOtherLink(link: Link): Boolean {
-        val peerId = link.peerId ?: return false
-        val other = links.values.firstOrNull { it !== link && it.isLive() && it.peerId == peerId } ?: return false
-        val winner = pickWinner(link, other, peerId)
-        val loser = if (winner === link) other else link
-        dropDuplicate(loser)
-        return loser === link
+    private fun resolveOtherLink(link: Link, proceed: () -> Unit) {
+        val peerId = link.peerId ?: return proceed()
+        val other = links.values.firstOrNull { it !== link && it.isLive() && it.peerId == peerId }
+        if (other == null) {
+            proceed()
+            return
+        }
+        if (other.phase != Phase.ESTABLISHED) {
+            val keepRole = if (store.localPeerId < peerId) Role.CENTRAL else Role.PERIPHERAL
+            if (link.role == keepRole && other.role != keepRole) {
+                dropDuplicate(other)
+                proceed()
+            } else {
+                dropDuplicate(link)
+            }
+            return
+        }
+        val generation = link.helloCount
+        host.log("Checking the established link to ${other.deviceId} before accepting another")
+        probe(other) { alive ->
+            if (!link.isLive() || link.helloCount != generation) {
+                return@probe
+            }
+            if (alive) {
+                dropDuplicate(link)
+            } else {
+                host.log("The established link to ${other.deviceId} is dead; replacing it")
+                dropDead(other)
+                proceed()
+            }
+        }
     }
 
-    /**
-     * An established link beats one still handshaking. Otherwise both phones keep the
-     * link whose central is the lower peerId, so they agree without talking.
-     */
-    private fun pickWinner(a: Link, b: Link, peerId: PeerId): Link {
-        val aEstablished = a.phase == Phase.ESTABLISHED
-        val bEstablished = b.phase == Phase.ESTABLISHED
-        if (aEstablished != bEstablished) {
-            return if (aEstablished) a else b
+    /** Sends a `/ping` on [link]; [done] gets whether its ACK came back in time. */
+    private fun probe(link: Link, done: (Boolean) -> Unit) {
+        val msgId = store.nextMsgId()
+        var finished = false
+        var timer: Cancellable? = null
+        val finish = { alive: Boolean ->
+            if (!finished) {
+                finished = true
+                timer?.cancel()
+                link.probes.remove(msgId)
+                done(alive)
+            }
         }
-        val keepRole = if (store.localPeerId < peerId) Role.CENTRAL else Role.PERIPHERAL
-        return if (a.role == keepRole || b.role != keepRole) a else b
+        timer = scheduler.schedule(PROBE_TIMEOUT_MS) { finish(false) }
+        link.probes[msgId] = { finish(true) }
+        val ping = Envelope.Data(msgId, Envelope.FLAG_ACK_REQ, PING_PATH, 0, ByteArray(0))
+        sendSealed(link, ping, PRIORITY_CONTROL) { written ->
+            if (!written) {
+                finish(false)
+            }
+        }
+    }
+
+    /** Ends an established [link] whose peer no longer answers. */
+    private fun dropDead(link: Link) {
+        when (link.role) {
+            Role.CENTRAL -> close(link)
+            Role.PERIPHERAL -> {
+                link.handshakeTimer?.cancel()
+                endSession(link)
+                link.phase = Phase.DONE
+                emitDisconnectedIfUnlinked(link.deviceId)
+            }
+        }
     }
 
     private fun dropDuplicate(link: Link) {
@@ -943,6 +1011,7 @@ class ProtocolEngine(
             receiveKey = Derivation.sessionKey(key, peerId, store.localPeerId, tHello)
         )
         link.phase = Phase.ESTABLISHED
+        host.log("Session with ${link.deviceId} on link ${link.id} (${link.role})")
         val hello = link.peerHello!!
         val stored = store.peers().firstOrNull { it.peerId == peerId }
         val updated = StoredPeer(
@@ -1037,6 +1106,10 @@ class ProtocolEngine(
     private fun onEnvelope(link: Link, channel: PeerChannel, envelope: Envelope) {
         when (envelope) {
             is Envelope.Ack -> {
+                link.probes.remove(envelope.refMsgId)?.let {
+                    it()
+                    return
+                }
                 val outgoing = channel.inFlight.remove(envelope.refMsgId) ?: return
                 complete(outgoing, envelope.status)
                 pumpChannel(channel)
@@ -1056,6 +1129,12 @@ class ProtocolEngine(
     }
 
     private fun onData(link: Link, channel: PeerChannel, data: Envelope.Data) {
+        if (data.path == PING_PATH) {
+            if (data.ackRequested) {
+                sendSealed(link, Envelope.Ack(data.msgId, DeliveryStatus.OK), PRIORITY_ACK)
+            }
+            return
+        }
         if (!data.ackRequested) {
             host.deliver(channel.peerId, data) {}
             return
@@ -1078,6 +1157,7 @@ class ProtocolEngine(
 
     private fun onUnpair(link: Link, channel: PeerChannel, unpair: Envelope.Unpair) {
         val peerId = channel.peerId
+        host.log("UNPAIR from ${link.deviceId} on link ${link.id}")
         store.deleteKey(peerId)
         store.peers().firstOrNull { it.peerId == peerId }?.let {
             store.update(it.copy(state = PeerState.UNPAIRED_BY_PEER))
@@ -1251,6 +1331,7 @@ class ProtocolEngine(
     fun removePeer(peerId: PeerId, done: () -> Unit) {
         val channel = channels[peerId]
         val link = channel?.link?.takeIf { it.phase == Phase.ESTABLISHED && !it.closed }
+        host.log("Removing $peerId (${if (link == null) "not connected" else "UNPAIR on link ${link.id}"})")
         if (channel == null || link == null) {
             forget(peerId)
             done()

@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -13,12 +12,16 @@ const String _bleEventsChannelName =
     'com.rouddy.bluetooth_communicator/bluetooth_events';
 const String _prefsAdvertisingEnabled = 'prefs_advertising_enabled';
 const String _prefsCentralEnabled = 'prefs_central_enabled';
-const String _prefsRegisteredDevices = 'prefs_registered_devices';
 const String _prefsPairingLost = 'prefs_pairing_lost';
 
-/// Keys of the removed chat (message history and unread counts), deleted on
-/// launch.
-const List<String> _obsoletePrefs = ['prefs_messages', 'prefs_unread_counts'];
+/// Keys that are no longer used, deleted on launch: the removed chat's message
+/// history and unread counts, and the registered devices, which native code
+/// now keeps (as app-paired peers).
+const List<String> _obsoletePrefs = [
+  'prefs_messages',
+  'prefs_unread_counts',
+  'prefs_registered_devices',
+];
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -40,7 +43,13 @@ class MyApp extends StatefulWidget {
 
 class _MyAppState extends State<MyApp> {
   final _messengerKey = GlobalKey<ScaffoldMessengerState>();
+  final _navigatorKey = GlobalKey<NavigatorState>();
   StreamSubscription<String>? _errors;
+  StreamSubscription<PairingRequest>? _pairingPrompts;
+
+  /// Devices whose pairing dialog is open, so a replayed request doesn't open a
+  /// second one.
+  final Set<String> _openPrompts = <String>{};
 
   @override
   void initState() {
@@ -52,11 +61,30 @@ class _MyAppState extends State<MyApp> {
         ?..hideCurrentSnackBar()
         ..showSnackBar(SnackBar(content: Text(message)));
     });
+    // Either phone can be asked to approve a pairing, whatever page is open.
+    _pairingPrompts = widget.controller.pairingPrompts.listen(_showPairingDialog);
+  }
+
+  Future<void> _showPairingDialog(PairingRequest request) async {
+    final context = _navigatorKey.currentContext;
+    if (context == null || !_openPrompts.add(request.deviceId)) {
+      return;
+    }
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => PairingDialog(
+        controller: widget.controller,
+        deviceId: request.deviceId,
+      ),
+    );
+    _openPrompts.remove(request.deviceId);
   }
 
   @override
   void dispose() {
     _errors?.cancel();
+    _pairingPrompts?.cancel();
     super.dispose();
   }
 
@@ -67,9 +95,110 @@ class _MyAppState extends State<MyApp> {
     final controller = widget.controller;
     return MaterialApp(
       scaffoldMessengerKey: _messengerKey,
+      navigatorKey: _navigatorKey,
       title: 'Bluetooth Communicator',
       theme: ThemeData(colorSchemeSeed: Colors.blue, useMaterial3: true),
       home: HomePage(controller: controller),
+    );
+  }
+}
+
+/// Shows the confirmation code of an app pairing (docs/protocol.md 6.3) until
+/// the user answers and the pairing ends; it closes itself when the request is
+/// gone (paired, declined, timed out, or the link dropped).
+class PairingDialog extends StatefulWidget {
+  const PairingDialog({
+    super.key,
+    required this.controller,
+    required this.deviceId,
+  });
+
+  final BleAppController controller;
+  final String deviceId;
+
+  @override
+  State<PairingDialog> createState() => _PairingDialogState();
+}
+
+class _PairingDialogState extends State<PairingDialog> {
+  bool _closing = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: widget.controller,
+      builder: (context, _) {
+        final request = widget.controller.pairingRequests[widget.deviceId];
+        if (request == null) {
+          if (!_closing) {
+            _closing = true;
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (mounted) {
+                Navigator.of(context).pop();
+              }
+            });
+          }
+          return const SizedBox.shrink();
+        }
+        return _buildDialog(context, request);
+      },
+    );
+  }
+
+  Widget _buildDialog(BuildContext context, PairingRequest request) {
+    final name = request.name.isEmpty ? request.deviceId : request.name;
+    return AlertDialog(
+      title: Text(request.repair ? '다시 연결 요청' : '연결 요청'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            request.repair
+                ? '$name와(과) 다시 연결합니다. 이전 연결 정보는 새로 바뀝니다.'
+                : '$name와(과) 연결합니다.',
+          ),
+          const SizedBox(height: 16),
+          Center(
+            child: Text(
+              request.code,
+              style: Theme.of(context).textTheme.displaySmall?.copyWith(
+                letterSpacing: 4,
+                fontFeatures: const [FontFeature.tabularFigures()],
+              ),
+            ),
+          ),
+          const SizedBox(height: 16),
+          const Text('두 기기에 같은 코드가 표시되는지 확인하세요.'),
+          if (request.approved) ...[
+            const SizedBox(height: 16),
+            const Row(
+              children: [
+                SizedBox.square(
+                  dimension: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+                SizedBox(width: 12),
+                Expanded(child: Text('상대 기기의 승인을 기다리는 중…')),
+              ],
+            ),
+          ],
+        ],
+      ),
+      actions: request.approved
+          ? const []
+          : [
+              TextButton(
+                onPressed: () =>
+                    widget.controller.respondPairing(widget.deviceId, false),
+                child: const Text('거절'),
+              ),
+              FilledButton(
+                onPressed: () =>
+                    widget.controller.respondPairing(widget.deviceId, true),
+                child: const Text('승인'),
+              ),
+            ],
     );
   }
 }
@@ -347,8 +476,8 @@ class DeviceControlPage extends StatelessWidget {
       builder: (context) => AlertDialog(
         title: const Text('기기 삭제'),
         content: const Text(
-          '연결 기록을 삭제하고 연결을 끊습니다. '
-          '페어링 정보는 시스템 Bluetooth 설정에서 따로 해제해야 합니다.',
+          '연결 기록을 삭제하고 연결을 끊습니다. 상대 기기에도 연결 해제를 알립니다. '
+          'Bluetooth 페어링 정보는 시스템 Bluetooth 설정에서 따로 해제해야 합니다.',
         ),
         actions: [
           TextButton(
@@ -378,7 +507,9 @@ class DeviceControlPage extends StatelessWidget {
         onPressed: null,
         child: Text('연결됨'),
       ),
-      LinkState.connecting || LinkState.bonding => const FilledButton.tonal(
+      LinkState.connecting ||
+      LinkState.bonding ||
+      LinkState.awaitingApproval => const FilledButton.tonal(
         onPressed: null,
         child: SizedBox.square(
           dimension: 16,
@@ -394,6 +525,7 @@ class DeviceControlPage extends StatelessWidget {
 
   Widget _buildPage(BuildContext context) {
     final isConnected = controller.connectedDeviceIds.contains(device.identifier);
+    final peerId = controller.peerFor(device.identifier)?.peerId;
     return Scaffold(
       appBar: AppBar(
         title: Text(device.name.isEmpty ? device.identifier : device.name),
@@ -416,6 +548,12 @@ class DeviceControlPage extends StatelessWidget {
             subtitle: Text(device.identifier),
             trailing: _linkButton(),
           ),
+          if (peerId != null)
+            ListTile(
+              leading: const Icon(Icons.fingerprint),
+              title: const Text('Peer ID'),
+              subtitle: Text(peerId),
+            ),
         ],
       ),
     );
@@ -639,12 +777,11 @@ class BleAppController extends ChangeNotifier {
     if (advertisingEnabled) {
       await _invoke('setAdvertisingEnabled', {'enabled': true});
     }
+    // Native code reconnects the app-paired peers itself, and replays them as a
+    // `peers` event.
     if (centralEnabled) {
       await _invoke('setCentralEnabled', {'enabled': true});
       await _invoke('scanNow');
-      for (final device in registeredDevices) {
-        await _invoke('connectDevice', {'deviceId': device.identifier});
-      }
     }
     notifyListeners();
   }
@@ -682,6 +819,9 @@ class BleAppController extends ChangeNotifier {
     if (connectedDeviceIds.contains(deviceId)) {
       return LinkState.connected;
     }
+    if (pairingRequests.containsKey(deviceId)) {
+      return LinkState.awaitingApproval;
+    }
     if (_bondingDeviceIds.contains(deviceId)) {
       return LinkState.bonding;
     }
@@ -696,11 +836,52 @@ class BleAppController extends ChangeNotifier {
 
   String linkLabel(String deviceId) => switch (linkStateFor(deviceId)) {
     LinkState.connected => '연결됨',
+    LinkState.awaitingApproval => '승인 대기 중…',
     LinkState.bonding => '페어링 중…',
     LinkState.connecting => '연결 중…',
-    LinkState.disconnected => '연결 안 됨',
     LinkState.pairingLost => '페어링 해제됨',
+    LinkState.disconnected => switch (peerFor(deviceId)?.state) {
+      PeerState.repairNeeded => '다시 연결 필요',
+      PeerState.badMac => '인증 실패',
+      PeerState.unpairedByPeer => '상대가 연결을 해제함',
+      _ => '연결 안 됨',
+    },
   };
+
+  /// The app-paired peer at [deviceId], if any.
+  BleDevice? peerFor(String deviceId) {
+    for (final device in registeredDevices) {
+      if (device.identifier == deviceId && device.peerId != null) {
+        return device;
+      }
+    }
+    return null;
+  }
+
+  /// App pairings waiting for this user's answer (or, once approved, for the
+  /// peer's), by device.
+  final Map<String, PairingRequest> pairingRequests = <String, PairingRequest>{};
+  final StreamController<PairingRequest> _pairingPrompts =
+      StreamController<PairingRequest>.broadcast();
+
+  /// Each new pairing request, to show its dialog.
+  Stream<PairingRequest> get pairingPrompts => _pairingPrompts.stream;
+
+  /// Answers the pairing request for [deviceId]. An approved request stays until
+  /// the peer's user answers too (`pairingResult`).
+  Future<void> respondPairing(String deviceId, bool accept) async {
+    final request = pairingRequests[deviceId];
+    if (request == null) {
+      return;
+    }
+    if (accept) {
+      request.approved = true;
+    } else {
+      pairingRequests.remove(deviceId);
+    }
+    notifyListeners();
+    await _invoke('respondPairing', {'deviceId': deviceId, 'accept': accept});
+  }
 
   /// Devices whose pairing was removed (on either phone). Their address belonged to
   /// that pairing, so they won't reconnect; they have to be paired again from the
@@ -741,26 +922,17 @@ class BleAppController extends ChangeNotifier {
       connectedDeviceIds.contains(deviceId) ||
       registeredDevices.any((d) => d.identifier == deviceId);
 
-  /// Forgets a device: it leaves the registered list (so it's no longer
-  /// connected automatically), and any live link is dropped. An OS-level pairing stays; only the system Bluetooth settings can
-  /// remove it. If the peer connects to us again, it gets registered again.
+  /// Forgets a device: native code tells the peer (UNPAIR), deletes the pairing
+  /// key, so it's no longer connected automatically, and drops every link. An
+  /// OS-level pairing stays; only the system Bluetooth settings can remove it.
   Future<void> removeDevice(String deviceId) async {
     registeredDevices.removeWhere((d) => d.identifier == deviceId);
     connectedDeviceIds.remove(deviceId);
     if (_pairingLostDeviceIds.remove(deviceId)) {
       unawaited(_savePairingLost());
     }
-    // Save before disconnecting: the Android service reads this list to decide
-    // whether to reconnect a dropped device.
-    await _saveRegisteredDevices();
     notifyListeners();
-    await _invoke('disconnectDevice', {'deviceId': deviceId});
-  }
-
-  Future<void> registerDevice(BleDevice device) async {
-    _upsertRegisteredDevice(device);
-    await _saveRegisteredDevices();
-    notifyListeners();
+    await _invoke('removeDevice', {'deviceId': deviceId});
   }
 
   Future<bool> _invoke(String method, [Map<String, dynamic>? arguments]) async {
@@ -803,6 +975,32 @@ class BleAppController extends ChangeNotifier {
     }
   }
 
+  String _displayName(String deviceId, [String? name]) {
+    final known = (name == null || name.isEmpty) ? _deviceById(deviceId).name : name;
+    return known.isEmpty ? deviceId : known;
+  }
+
+  /// What to tell the user when an app pairing ends without success.
+  static String? _pairingFailureMessage(String name, String result) => switch (result) {
+    'paired' => null,
+    'rejected' => '$name와(과)의 연결이 거절되었습니다.',
+    'timeout' => '$name의 승인을 기다리는 시간이 지났습니다.',
+    'cannotPrompt' => '$name에서 승인 화면을 띄울 수 없습니다. 상대 기기에서 앱을 열어 주세요.',
+    'mismatch' || 'badMac' => '$name와(과)의 보안 확인에 실패했습니다.',
+    'linkLost' => '$name와(과)의 연결이 끊어져 연결 승인을 마치지 못했습니다.',
+    _ => '$name와(과)의 연결 승인에 실패했습니다 ($result).',
+  };
+
+  /// What to tell the user about a REJECT. Pairing failures come as
+  /// `pairingResult`, and turning away an unknown phone is routine.
+  static String? _rejectMessage(String name, String reason, bool byPeer) =>
+      switch ((reason, byPeer)) {
+        ('unknownPeer', true) => '$name에서 이 기기를 삭제했습니다. 다시 연결하려면 연결 버튼을 누르세요.',
+        ('badMac', _) => '$name의 인증에 실패했습니다. 보안을 위해 자동으로 다시 연결하지 않습니다.',
+        ('unsupportedVersion', _) => '$name의 앱 버전과 호환되지 않습니다.',
+        _ => null,
+      };
+
   void _handleEvent(dynamic data) {
     if (data is! Map) {
       return;
@@ -828,6 +1026,7 @@ class BleAppController extends ChangeNotifier {
         }
         break;
       case 'connected':
+        // A session with an app-paired peer; the name is the one it announced.
         final id = event['deviceId'] as String?;
         if (id != null) {
           _settleLink(id);
@@ -835,8 +1034,79 @@ class BleAppController extends ChangeNotifier {
             unawaited(_savePairingLost());
           }
           connectedDeviceIds.add(id);
-          _upsertRegisteredDevice(_deviceById(id));
-          unawaited(_saveRegisteredDevices());
+          final known = _deviceById(id);
+          _upsertRegisteredDevice(
+            BleDevice(
+              identifier: id,
+              name: event['name'] as String? ?? known.name,
+              peerId: event['peerId'] as String? ?? known.peerId,
+              state: PeerState.paired,
+            ),
+          );
+        }
+        break;
+      case 'peers':
+        // The app-paired peers native code keeps; the 연결 기록 list.
+        final peers = (event['peers'] as List?)?.whereType<Map>() ?? const <Map>[];
+        registeredDevices
+          ..clear()
+          ..addAll(peers.map((peer) => BleDevice.fromMap(peer.cast<String, dynamic>())));
+        for (final peer in peers) {
+          final id = peer['deviceId'];
+          if (peer['connected'] == true && id is String) {
+            connectedDeviceIds.add(id);
+          }
+        }
+        break;
+      case 'pairingRequest':
+        if (event['deviceId'] case final String id) {
+          // The connect timeout doesn't apply while the users decide.
+          _connectTimeouts.remove(id)?.cancel();
+          _bondingDeviceIds.remove(id);
+          final isNew = !pairingRequests.containsKey(id);
+          final request = PairingRequest(
+            deviceId: id,
+            peerId: event['peerId'] as String? ?? '',
+            name: event['name'] as String? ?? '',
+            code: event['code'] as String? ?? '',
+            repair: event['repair'] == true,
+          );
+          if (!isNew) {
+            request.approved = pairingRequests[id]!.approved;
+          }
+          pairingRequests[id] = request;
+          _pairingPrompts.add(request);
+        }
+        break;
+      case 'pairingResult':
+        if (event['deviceId'] case final String id) {
+          final request = pairingRequests.remove(id);
+          final result = event['result'] as String? ?? '';
+          if (result != 'paired') {
+            _settleLink(id);
+          }
+          final message = _pairingFailureMessage(_displayName(id, request?.name), result);
+          if (message != null) {
+            _reportError(message);
+          }
+        }
+        break;
+      case 'peerRejected':
+        if (event['deviceId'] case final String id) {
+          _settleLink(id);
+          final message = _rejectMessage(
+            _displayName(id),
+            event['reason'] as String? ?? '',
+            event['byPeer'] == true,
+          );
+          if (message != null) {
+            _reportError(message);
+          }
+        }
+        break;
+      case 'peerUnpaired':
+        if (event['deviceId'] case final String id) {
+          _reportError('${_displayName(id)}에서 연결을 해제했습니다.');
         }
         break;
       case 'disconnected':
@@ -883,19 +1153,6 @@ class BleAppController extends ChangeNotifier {
     }
     advertisingEnabled = prefs.getBool(_prefsAdvertisingEnabled) ?? false;
     centralEnabled = prefs.getBool(_prefsCentralEnabled) ?? false;
-    final jsonText = prefs.getString(_prefsRegisteredDevices);
-    if (jsonText != null) {
-      final raw = jsonDecode(jsonText);
-      if (raw is List) {
-        registeredDevices
-          ..clear()
-          ..addAll(
-            raw
-                .whereType<Map>()
-                .map((item) => BleDevice.fromMap(item.cast<String, dynamic>())),
-          );
-      }
-    }
     // initialize() can run again (permission retry); the in-memory state is newer
     // than what's stored by then.
     if (!_stateLoaded) {
@@ -909,18 +1166,12 @@ class BleAppController extends ChangeNotifier {
 
   bool _stateLoaded = false;
 
-  Future<void> _saveRegisteredDevices() async {
-    await _prefs?.setString(
-      _prefsRegisteredDevices,
-      jsonEncode(registeredDevices.map((d) => d.toMap()).toList()),
-    );
-  }
-
   @override
   void dispose() {
     _eventsSubscription?.cancel();
     _pruneTimer?.cancel();
     _errors.close();
+    _pairingPrompts.close();
     for (final timer in _connectTimeouts.values) {
       timer.cancel();
     }
@@ -929,22 +1180,67 @@ class BleAppController extends ChangeNotifier {
 }
 
 class BleDevice {
-  BleDevice({required this.identifier, required this.name});
+  BleDevice({
+    required this.identifier,
+    required this.name,
+    this.peerId,
+    this.state,
+  });
 
   final String identifier;
   final String name;
+
+  /// The peer's install id, for app-paired peers (docs/protocol.md 2절).
+  final String? peerId;
+
+  /// Null for nearby devices that aren't app-paired.
+  final PeerState? state;
 
   factory BleDevice.fromMap(Map<String, dynamic> map) {
     return BleDevice(
       identifier: (map['deviceId'] ?? map['identifier'] ?? '').toString(),
       name: (map['name'] ?? '').toString(),
+      peerId: map['peerId'] as String?,
+      state: PeerState.values.asNameMap()[map['state']],
     );
   }
+}
 
-  Map<String, dynamic> toMap() => <String, dynamic>{
-        'identifier': identifier,
-        'name': name,
-      };
+/// An app-paired peer's state (`peers` event).
+enum PeerState {
+  paired,
+
+  /// The peer answered that it doesn't know this phone (it deleted it, or the
+  /// app was reinstalled); the 연결 button pairs again.
+  repairNeeded,
+
+  /// The peer's authentication failed; not reconnected automatically.
+  badMac,
+
+  /// The peer deleted this phone.
+  unpairedByPeer,
+}
+
+/// A `pairingRequest` event: both phones show [code] until both users approve.
+class PairingRequest {
+  PairingRequest({
+    required this.deviceId,
+    required this.peerId,
+    required this.name,
+    required this.code,
+    required this.repair,
+  });
+
+  final String deviceId;
+  final String peerId;
+  final String name;
+  final String code;
+
+  /// The peer was app-paired before (it was deleted or reinstalled).
+  final bool repair;
+
+  /// This user approved; waiting for the peer's.
+  bool approved = false;
 }
 
 /// The `status` event both native sides send whenever their state changes.
@@ -984,4 +1280,13 @@ class BleStatus {
   }
 }
 
-enum LinkState { disconnected, connecting, bonding, connected, pairingLost }
+enum LinkState {
+  disconnected,
+  connecting,
+  bonding,
+
+  /// The app pairing's confirmation code is up, waiting for the users.
+  awaitingApproval,
+  connected,
+  pairingLost,
+}

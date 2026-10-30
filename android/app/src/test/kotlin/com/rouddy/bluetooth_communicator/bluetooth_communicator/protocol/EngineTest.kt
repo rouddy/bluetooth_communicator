@@ -374,6 +374,42 @@ class EngineTest {
     }
 
     @Test
+    fun `after a deletion, connecting from the other phone asks both users again`() {
+        val connection = pair()
+        a.engine.removePeer(b.peerId) {}
+        settle()
+        assertFalse(connection.open)
+        a.events.clear()
+        b.events.clear()
+
+        // B taps 연결; neither side may authenticate with a leftover key.
+        network.connect(b, a, userInitiated = true)
+        settle()
+
+        assertEquals(1, a.eventsOf<EngineEvent.PairingRequest>().size)
+        assertEquals(1, b.eventsOf<EngineEvent.PairingRequest>().size)
+        assertTrue(a.engine.isConnected(b.address))
+        assertEquals(PeerState.PAIRED, b.store.peers().single().state)
+    }
+
+    @Test
+    fun `after a deletion, the peer's own reconnect attempt is refused`() {
+        val connection = pair()
+        // UNPAIR doesn't arrive: B keeps its key and tries again on its own.
+        connection.drop()
+        a.engine.removePeer(b.peerId) {}
+        b.events.clear()
+
+        val again = network.connect(b, a)
+        settle()
+
+        assertFalse(again.open)
+        assertFalse(a.engine.isConnected(b.address))
+        assertEquals(PeerState.REPAIR_NEEDED, b.store.peers().single().state)
+        assertTrue(a.store.peers().isEmpty())
+    }
+
+    @Test
     fun `deleting a peer that isn't connected forgets it right away`() {
         pair().drop()
         var done = false
@@ -429,6 +465,26 @@ class EngineTest {
         assertTrue(b.eventsOf<EngineEvent.Disconnected>().none { it.deviceId == a.address })
         assertEquals(listOf(DeliveryStatus.OK), b.send(a, "y".toByteArray()).also { settle() })
         assertFalse(b.engine.shouldReconnect(a.address))
+    }
+
+    @Test
+    fun `a peer whose app restarted under a live connection replaces its dead session`() {
+        val old = pair()
+        // B's app restarts. Other apps keep Bluetooth connected, so A's link never
+        // goes down; it just stops reaching anyone.
+        old.delivers = false
+        val restarted = network.phone("B", b.address, b.peerId)
+        restarted.store.peerMap.putAll(b.store.peerMap)
+        restarted.store.keys.putAll(b.store.keys)
+
+        val fresh = network.connect(restarted, a)
+        settle(ProtocolEngine.PROBE_TIMEOUT_MS + 2_000)
+
+        assertTrue(fresh.open)
+        assertTrue(a.engine.isConnected(b.address))
+        assertTrue(restarted.engine.isConnected(a.address))
+        assertEquals(listOf(DeliveryStatus.OK), a.send(restarted, "hi".toByteArray()).also { settle() })
+        assertEquals(1, restarted.delivered.size)
     }
 
     @Test

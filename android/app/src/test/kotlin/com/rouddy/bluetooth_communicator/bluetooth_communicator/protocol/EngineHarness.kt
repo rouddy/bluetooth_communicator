@@ -147,6 +147,9 @@ class Network(private val scheduler: FakeScheduler) {
     ) {
         var open = true
 
+        /** False when the far end's app died but Bluetooth stayed connected. */
+        var delivers = true
+
         fun drop() {
             if (!open) {
                 return
@@ -187,7 +190,7 @@ class Network(private val scheduler: FakeScheduler) {
                 return@schedule
             }
             from.engine.frameWritten(linkId, true)
-            if (lose(from, frame)) {
+            if (!connection.delivers || lose(from, frame)) {
                 return@schedule
             }
             if (from === connection.central) {
