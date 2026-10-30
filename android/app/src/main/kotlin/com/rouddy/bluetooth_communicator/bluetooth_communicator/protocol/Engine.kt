@@ -460,6 +460,9 @@ class ProtocolEngine(
         PeerSummary(peer, channel?.link?.phase == Phase.ESTABLISHED, channel?.caps)
     }
 
+    /** The last CAPS [peerId] sent (kept across its sessions), or null if none yet. */
+    fun capsOf(peerId: PeerId): Capabilities? = channels[peerId]?.caps
+
     private fun Link.isLive() = !closed && phase != Phase.DONE
 
     private fun close(link: Link) {

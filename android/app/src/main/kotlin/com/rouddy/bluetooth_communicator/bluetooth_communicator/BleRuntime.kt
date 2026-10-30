@@ -23,6 +23,7 @@ import com.rouddy.bluetooth_communicator.bluetooth_communicator.protocol.Envelop
 import com.rouddy.bluetooth_communicator.bluetooth_communicator.protocol.LocalIdentity
 import com.rouddy.bluetooth_communicator.bluetooth_communicator.protocol.PeerId
 import com.rouddy.bluetooth_communicator.bluetooth_communicator.protocol.PeerState
+import com.rouddy.bluetooth_communicator.bluetooth_communicator.protocol.PeerSummary
 import com.rouddy.bluetooth_communicator.bluetooth_communicator.protocol.Platform
 import com.rouddy.bluetooth_communicator.bluetooth_communicator.protocol.ProtocolEngine
 import com.rouddy.bluetooth_communicator.bluetooth_communicator.protocol.RejectReason
@@ -66,6 +67,13 @@ object BleRuntime : EngineHost {
 
     var transport: BleTransport? = null
     var router: AppRouter? = null
+    lateinit var registry: AppRegistry
+        private set
+
+    /** The peers as of the last change, for binder threads (AIDL getPeers). */
+    @Volatile
+    var peerSnapshot: List<PeerSummary> = emptyList()
+        private set
 
     private val scheduler = object : Scheduler {
         override fun now() = SystemClock.elapsedRealtime()
@@ -85,6 +93,9 @@ object BleRuntime : EngineHost {
         this.context = context.applicationContext
         store = AndroidPeerStore(this.context)
         engine = ProtocolEngine(this, store, scheduler)
+        peerSnapshot = engine.peerSummaries()
+        registry = AppRegistry(this.context)
+        router = registry
         this.context.getSystemService(NotificationManager::class.java).createNotificationChannel(
             NotificationChannel(PAIRING_CHANNEL_ID, "기기 연결 요청", NotificationManager.IMPORTANCE_HIGH)
         )
@@ -143,10 +154,11 @@ object BleRuntime : EngineHost {
     }
 
     override fun onEvent(event: EngineEvent) {
-        if (event is EngineEvent.PeersChanged) {
-            schedulePeersEvent()
-        } else {
+        if (event !is EngineEvent.PeersChanged) {
             onDartEvent(event)
+        }
+        if (event is EngineEvent.PeersChanged || event is EngineEvent.Connected || event is EngineEvent.Disconnected) {
+            schedulePeersEvent()
         }
         when (event) {
             is EngineEvent.PairingRequest -> notifyPairing(event)
@@ -154,9 +166,6 @@ object BleRuntime : EngineHost {
             else -> Unit
         }
         transport?.onEngineEvent(event)
-        if (event is EngineEvent.PeersChanged || event is EngineEvent.Connected || event is EngineEvent.Disconnected) {
-            router?.onPeersChanged()
-        }
     }
 
     override fun log(message: String) {
@@ -201,7 +210,8 @@ object BleRuntime : EngineHost {
 
     private var peersEventPending = false
 
-    // A session start changes the peers several times in a row; send one list.
+    // A session start changes the peers several times in a row; send one list, to
+    // Dart and to the AIDL listeners.
     private fun schedulePeersEvent() {
         if (peersEventPending) {
             return
@@ -209,7 +219,9 @@ object BleRuntime : EngineHost {
         peersEventPending = true
         handler.post {
             peersEventPending = false
+            peerSnapshot = engine.peerSummaries()
             BleEventBus.emit(peersEvent())
+            router?.onPeersChanged()
         }
     }
 

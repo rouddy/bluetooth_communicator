@@ -11,6 +11,11 @@ android {
     compileSdk = 37
     ndkVersion = flutter.ndkVersion
 
+    // The AIDL service other apps bind to (docs/protocol.md 11절).
+    buildFeatures {
+        aidl = true
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
