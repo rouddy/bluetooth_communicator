@@ -116,6 +116,12 @@ class Phone(
         }
     }
 
+    val logs = mutableListOf<String>()
+
+    override fun log(message: String) {
+        logs += "${scheduler.now()} $message"
+    }
+
     override fun onEvent(event: EngineEvent) {
         events += event
         val answer = approve

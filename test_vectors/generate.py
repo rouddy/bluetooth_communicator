@@ -38,10 +38,12 @@ def tlv(tag, value):
     return bytes([tag]) + struct.pack("<H", len(value)) + value
 
 
-def hello(peer_id, nonce, name, platform, app_version, max_message_size):
-    return (bytes([1, 0x01]) + tlv(1, peer_id) + tlv(2, nonce) + tlv(3, name.encode())
-            + tlv(4, bytes([platform])) + tlv(5, app_version.encode())
-            + tlv(6, struct.pack("<I", max_message_size)))
+def hello(peer_id, nonce, name, platform, app_version, max_message_size, nonce_c=None):
+    record = (bytes([1, 0x01]) + tlv(1, peer_id) + tlv(2, nonce) + tlv(3, name.encode())
+              + tlv(4, bytes([platform])) + tlv(5, app_version.encode())
+              + tlv(6, struct.pack("<I", max_message_size)))
+    # HELLO_p echoes the nonce of the HELLO_c it answers.
+    return record + tlv(7, nonce_c) if nonce_c else record
 
 
 def envelope(type_, flags, msg_id, body):
@@ -78,7 +80,7 @@ def split(record, tid, size):
 peer_c = bytes.fromhex("11111111111111111111111111111111")
 peer_p = bytes.fromhex("0123456789abcdeffedcba9876543210")
 hello_c = hello(peer_c, bytes(range(16)), "재홍의 Z Fold5", 1, "1.0.0", 65536)
-hello_p = hello(peer_p, bytes(range(16, 32)), "RouddySE", 2, "1.0.0", 65536)
+hello_p = hello(peer_p, bytes(range(16, 32)), "RouddySE", 2, "1.0.0", 65536, nonce_c=bytes(range(16)))
 t_hello = h(hello_c, hello_p)
 
 key_p, key_c = private_key(0x22), private_key(0x33)
@@ -108,7 +110,8 @@ vectors = {
         "helloC": {"nonce": bytes(range(16)).hex(), "name": "재홍의 Z Fold5", "platform": 1,
                    "appVersion": "1.0.0", "maxMessageSize": 65536, "bytes": hello_c.hex()},
         "helloP": {"nonce": bytes(range(16, 32)).hex(), "name": "RouddySE", "platform": 2,
-                   "appVersion": "1.0.0", "maxMessageSize": 65536, "bytes": hello_p.hex()},
+                   "appVersion": "1.0.0", "maxMessageSize": 65536, "nonceC": bytes(range(16)).hex(),
+                   "bytes": hello_p.hex()},
         "tHello": t_hello.hex(),
         "privateKeyP": (bytes([0x22]) * 32).hex(),
         "privateKeyC": (bytes([0x33]) * 32).hex(),

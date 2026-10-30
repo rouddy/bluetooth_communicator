@@ -251,6 +251,7 @@ class ProtocolEngine(
         val reassembler = FrameReassembler(MAX_MESSAGE_SIZE)
         var phase = Phase.AWAIT_HELLO
         var ownHello: ByteArray? = null
+        var ownNonce: ByteArray? = null
         var peerHello: Record.Hello? = null
         var tHello: ByteArray? = null
         var pairing: Pairing? = null
@@ -516,23 +517,26 @@ class ProtocolEngine(
         link.peerHello = null
         link.tHello = null
         link.pairing = null
-        val bytes = ownHello()
+        val nonce = ByteArray(Record.NONCE_SIZE).also(random::nextBytes)
+        val bytes = ownHello(nonce, nonceC = null)
         link.ownHello = bytes
+        link.ownNonce = nonce
         sendRecord(link, bytes, PRIORITY_HANDSHAKE)
         armHandshakeTimer(link)
     }
 
-    private fun ownHello(): ByteArray {
+    private fun ownHello(nonce: ByteArray, nonceC: ByteArray?): ByteArray {
         val identity = host.localIdentity()
         return Record.encode(
             Record.Hello(
                 version = PROTOCOL_VERSION,
                 peerId = store.localPeerId,
-                nonce = ByteArray(Record.NONCE_SIZE).also(random::nextBytes),
+                nonce = nonce,
                 name = identity.name,
                 platform = identity.platform,
                 appVersion = identity.appVersion,
-                maxMessageSize = MAX_MESSAGE_SIZE.toLong()
+                maxMessageSize = MAX_MESSAGE_SIZE.toLong(),
+                nonceC = nonceC
             )
         )
     }
@@ -601,7 +605,7 @@ class ProtocolEngine(
                     return
                 }
                 resolveOtherLink(link) {
-                    val own = ownHello()
+                    val own = ownHello(ByteArray(Record.NONCE_SIZE).also(random::nextBytes), nonceC = hello.nonce)
                     link.ownHello = own
                     link.tHello = Derivation.tHello(bytes, own)
                     link.phase = Phase.AWAIT_AUTH
@@ -613,7 +617,18 @@ class ProtocolEngine(
                 if (link.phase == Phase.DONE) {
                     return
                 }
+                // A central that restarts its handshake on the same connection (the peer
+                // re-registered its GATT server) gets the answer to its previous HELLO
+                // too; using it would make AUTH fail as BAD_MAC.
+                val echo = hello.nonceC
+                if (echo != null && !echo.contentEquals(link.ownNonce)) {
+                    host.log("Ignored a HELLO answering an earlier one on link ${link.id}")
+                    return
+                }
                 if (link.phase != Phase.AWAIT_HELLO) {
+                    if (echo != null) {
+                        return
+                    }
                     // A peripheral never sends HELLO unprompted; start over.
                     endSession(link)
                     sendHello(link)

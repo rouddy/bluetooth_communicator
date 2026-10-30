@@ -79,6 +79,8 @@ struct Hello {
   var platform: Int?
   var appVersion: String?
   var maxMessageSize: UInt32?
+  /// HELLO_p only: the nonce of the HELLO_c it answers (6.2).
+  var nonceC: Data?
 }
 
 /// A record (5절). `sealed` carries an Envelope; the others are the plaintext handshake.
@@ -114,6 +116,7 @@ enum Record {
   private static let tagPlatform = 0x04
   private static let tagAppVersion = 0x05
   private static let tagMaxMessageSize = 0x06
+  private static let tagNonceC = 0x07
 
   /// Bytes 0-5 of a SEALED record: the AES-GCM AAD.
   static func sealedHeader(counter: UInt32) -> Data {
@@ -145,6 +148,9 @@ enum Record {
         var value = ByteWriter()
         value.u32(size)
         Tlv.put(&writer, tagMaxMessageSize, value.data)
+      }
+      if let nonceC = hello.nonceC {
+        Tlv.put(&writer, tagNonceC, nonceC)
       }
     case .auth(let mac):
       writer.u8(protocolVersion)
@@ -222,6 +228,7 @@ enum Record {
       case tagMaxMessageSize:
         var size = ByteReader(try requireSize(value, 4))
         hello.maxMessageSize = try size.u32()
+      case tagNonceC: hello.nonceC = try requireSize(value, nonceSize)
       default: break
       }
     }

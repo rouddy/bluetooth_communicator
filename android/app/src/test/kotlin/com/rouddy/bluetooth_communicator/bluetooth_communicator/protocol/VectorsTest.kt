@@ -42,6 +42,17 @@ class VectorsTest {
         assertEquals(peerP, decoded.peerId)
         assertEquals("RouddySE", decoded.name)
         assertEquals(Platform.IOS, decoded.platform)
+        assertArrayEquals(handshake.getJSONObject("helloP").hex("nonceC"), decoded.nonceC)
+        val helloP = handshake.getJSONObject("helloP")
+        assertArrayEquals(
+            helloP.hex("bytes"),
+            Record.encode(
+                Record.Hello(
+                    1, peerP, helloP.hex("nonce"), helloP.getString("name"), helloP.getInt("platform"),
+                    helloP.getString("appVersion"), helloP.getLong("maxMessageSize"), helloP.hex("nonceC")
+                )
+            )
+        )
     }
 
     @Test

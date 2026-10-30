@@ -153,10 +153,12 @@ P → C  AUTH_p                     AUTH_c가 맞으면. 이것으로 세션이 
 | 0x04 | platform | u8 | 1 Android, 2 iOS |
 | 0x05 | appVersion | UTF-8 | |
 | 0x06 | maxMessageSize | u32 | |
+| 0x07 | nonceC | 16바이트 | HELLO_p만. 답하는 HELLO_c의 nonce |
 
 - HELLO의 version은 보내는 쪽이 지원하는 가장 높은 버전입니다. 양쪽은 둘 중 낮은 버전으로 동작하고, 공통 버전이 없으면 REJECT(UNSUPPORTED_VERSION)입니다.
 - name: Android는 `Settings.Global.DEVICE_NAME`을 씁니다. iOS는 16부터 별도 entitlement 없이는 `UIDevice.name`이 "iPhone"만 돌려주므로, 앱 설정에서 이름을 받습니다(기본값 "iPhone").
 - `T_hello = H(HELLO_c ‖ HELLO_p)`. 각 HELLO는 다시 합친 record 바이트 전체입니다.
+- C는 nonceC가 자기가 보낸 HELLO_c의 nonce와 다른 HELLO_p를 버립니다. C가 같은 연결에서 핸드셰이크를 다시 시작하면(상대가 GATT server를 다시 등록해서 다시 구독하는 경우) 앞선 HELLO_c에 대한 답도 오는데, 그것으로 T_hello를 계산하면 AUTH가 BAD_MAC으로 실패하기 때문입니다(기기에서 확인함). nonceC가 없는 HELLO_p는 예전처럼 받습니다.
 - HELLO는 평문이지만 T_hello가 AUTH와 세션 키에 들어갑니다. 그래서 내용을 바꿔치기하면 AUTH가 실패합니다. nonce가 링크마다 새로 만들어지므로, 다른 링크에서 엿본 AUTH도 통하지 않습니다.
 
 ### 6.3 앱 페어링

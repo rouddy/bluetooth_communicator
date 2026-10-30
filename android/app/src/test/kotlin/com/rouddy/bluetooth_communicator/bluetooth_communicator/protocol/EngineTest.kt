@@ -521,10 +521,47 @@ class EngineTest {
         // A's app restarted on the same link: its central sends a fresh HELLO.
         a.engine.linkUp(connection.centralLink, Role.CENTRAL, b.address, network.maxFrameSize, false)
         settle()
+        println("A: " + a.logs.joinToString("\n   ")); println("B: " + b.logs.joinToString("\n   "))
 
         assertTrue(a.engine.isConnected(b.address))
         assertTrue(b.engine.isConnected(a.address))
         assertEquals(listOf(DeliveryStatus.OK), b.send(a, "after".toByteArray()).also { settle() })
+    }
+
+    @Test
+    fun `a handshake restarted on the same connection ignores the answer to the old one`() {
+        pair().drop()
+        a.events.clear()
+        b.events.clear()
+
+        // The peer re-registered its GATT server right after we connected
+        // (onServiceChanged), so we subscribe again and send a second HELLO after the
+        // first arrived but before its answer did.
+        network.maxFrameSize = 512
+        val connection = network.connect(a, b)
+        scheduler.advance(1)
+        a.engine.linkUp(connection.centralLink, Role.CENTRAL, b.address, network.maxFrameSize, false)
+        settle()
+
+        assertTrue(a.engine.isConnected(b.address))
+        assertTrue(b.engine.isConnected(a.address))
+        assertTrue(a.eventsOf<EngineEvent.PeerRejected>().isEmpty())
+        assertTrue(b.eventsOf<EngineEvent.PeerRejected>().isEmpty())
+        assertEquals(PeerState.PAIRED, a.store.peers().single().state)
+        assertEquals(PeerState.PAIRED, b.store.peers().single().state)
+    }
+
+    @Test
+    fun `a pairing restarted on the same connection asks each user once`() {
+        network.maxFrameSize = 512
+        val connection = network.connect(a, b, userInitiated = true)
+        scheduler.advance(1)
+        a.engine.linkUp(connection.centralLink, Role.CENTRAL, b.address, network.maxFrameSize, true)
+        settle()
+
+        assertTrue(a.engine.isConnected(b.address))
+        assertEquals(1, a.eventsOf<EngineEvent.PairingRequest>().size)
+        assertEquals(1, b.eventsOf<EngineEvent.PairingRequest>().size)
     }
 
     @Test

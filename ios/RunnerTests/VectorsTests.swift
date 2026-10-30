@@ -38,6 +38,10 @@ final class VectorsTests: XCTestCase {
     XCTAssertEqual(decoded.peerId, PeerId(hex(handshake, "peerIdP")))
     XCTAssertEqual(decoded.name, "RouddySE")
     XCTAssertEqual(decoded.platform, Platform.ios)
+    XCTAssertEqual(decoded.nonceC, hex(handshake["helloP"], "nonceC"))
+    var helloP = hello("helloP", PeerId(hex(handshake, "peerIdP")))
+    helloP.nonceC = hex(handshake["helloP"], "nonceC")
+    XCTAssertEqual(Record.encode(.hello(helloP)), hex(handshake["helloP"], "bytes"))
   }
 
   func testTheHandshakeDerivationsMatch() throws {

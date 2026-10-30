@@ -97,7 +97,9 @@ sealed class Record {
         val name: String? = null,
         val platform: Int? = null,
         val appVersion: String? = null,
-        val maxMessageSize: Long? = null
+        val maxMessageSize: Long? = null,
+        /** HELLO_p only: the nonce of the HELLO_c it answers (6.2). */
+        val nonceC: ByteArray? = null
     ) : Record()
 
     class Auth(val mac: ByteArray) : Record()
@@ -140,6 +142,7 @@ sealed class Record {
         private const val TAG_PLATFORM = 0x04
         private const val TAG_APP_VERSION = 0x05
         private const val TAG_MAX_MESSAGE_SIZE = 0x06
+        private const val TAG_NONCE_C = 0x07
 
         fun sealedHeader(counter: Long): ByteArray =
             ByteWriter(6).u8(PROTOCOL_VERSION).u8(SEALED).u32(counter).toByteArray()
@@ -168,6 +171,7 @@ sealed class Record {
                     record.maxMessageSize?.let {
                         tlv.put(TAG_MAX_MESSAGE_SIZE, ByteWriter(4).u32(it).toByteArray())
                     }
+                    record.nonceC?.let { tlv.put(TAG_NONCE_C, it) }
                 }
                 is Auth -> writer.bytes(record.mac)
                 PairRequest -> Unit
@@ -214,6 +218,7 @@ sealed class Record {
             var platform: Int? = null
             var appVersion: String? = null
             var maxMessageSize: Long? = null
+            var nonceC: ByteArray? = null
             Tlv.read(reader) { tag, value ->
                 when (tag) {
                     TAG_PEER_ID -> peerId = PeerId(value.requireSize(PeerId.SIZE))
@@ -222,6 +227,7 @@ sealed class Record {
                     TAG_PLATFORM -> platform = value.requireSize(1)[0].toInt() and 0xFF
                     TAG_APP_VERSION -> appVersion = value.toString(Charsets.UTF_8)
                     TAG_MAX_MESSAGE_SIZE -> maxMessageSize = ByteReader(value.requireSize(4)).u32()
+                    TAG_NONCE_C -> nonceC = value.requireSize(NONCE_SIZE)
                 }
             }
             return Hello(
@@ -231,7 +237,8 @@ sealed class Record {
                 name = name,
                 platform = platform,
                 appVersion = appVersion,
-                maxMessageSize = maxMessageSize
+                maxMessageSize = maxMessageSize,
+                nonceC = nonceC
             )
         }
 

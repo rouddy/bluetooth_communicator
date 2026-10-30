@@ -261,6 +261,36 @@ final class EngineTests: XCTestCase {
     XCTAssertEqual(results.value, [DeliveryStatus.ok])
   }
 
+  func testAHandshakeRestartedOnTheSameConnectionIgnoresTheAnswerToTheOldOne() {
+    pair().drop()
+    a.events = []
+    b.events = []
+    // The peer re-registered its GATT server right after we connected, so we subscribe
+    // again and send a second HELLO after the first arrived but before its answer did.
+    network.maxFrameSize = 512
+    let connection = network.connect(a, b)
+    scheduler.advance(1)
+    a.engine.linkUp(linkId: connection.centralLink, role: .central, deviceId: b.address, maxFrameSize: 512, userInitiated: false)
+    settle()
+
+    XCTAssertTrue(a.engine.isConnected(deviceId: b.address))
+    XCTAssertTrue(b.engine.isConnected(deviceId: a.address))
+    XCTAssertEqual(a.store.peers().first?.state, .paired)
+    XCTAssertEqual(b.store.peers().first?.state, .paired)
+  }
+
+  func testAPairingRestartedOnTheSameConnectionAsksEachUserOnce() {
+    network.maxFrameSize = 512
+    let connection = network.connect(a, b, userInitiated: true)
+    scheduler.advance(1)
+    a.engine.linkUp(linkId: connection.centralLink, role: .central, deviceId: b.address, maxFrameSize: 512, userInitiated: true)
+    settle()
+
+    XCTAssertTrue(a.engine.isConnected(deviceId: b.address))
+    XCTAssertEqual(a.pairingRequests.count, 1)
+    XCTAssertEqual(b.pairingRequests.count, 1)
+  }
+
   func testAPeerWhoseAppRestartedUnderALiveConnectionReplacesItsDeadSession() {
     let old = pair()
     old.delivers = false

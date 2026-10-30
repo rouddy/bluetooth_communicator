@@ -269,6 +269,7 @@ final class ProtocolEngine {
     let reassembler = FrameReassembler(maxRecordSize: maxMessageBytes)
     var phase = Phase.awaitHello
     var ownHello: Data?
+    var ownNonce: Data?
     var peerHello: Hello?
     var tHello: Data?
     var pairing: Pairing?
@@ -590,16 +591,21 @@ final class ProtocolEngine {
     link.peerHello = nil
     link.tHello = nil
     link.pairing = nil
-    let bytes = ownHello()
+    let nonce = randomNonce()
+    let bytes = ownHello(nonce: nonce, nonceC: nil)
     link.ownHello = bytes
+    link.ownNonce = nonce
     sendRecord(link, bytes, ProtocolEngine.priorityHandshake)
     armHandshakeTimer(link)
   }
 
-  private func ownHello() -> Data {
-    let identity = host.localIdentity()
+  private func randomNonce() -> Data {
     var generator = SystemRandomNumberGenerator()
-    let nonce = Data((0..<Record.nonceSize).map { _ in UInt8.random(in: .min ... .max, using: &generator) })
+    return Data((0..<Record.nonceSize).map { _ in UInt8.random(in: .min ... .max, using: &generator) })
+  }
+
+  private func ownHello(nonce: Data, nonceC: Data?) -> Data {
+    let identity = host.localIdentity()
     return Record.encode(.hello(Hello(
       version: protocolVersion,
       peerId: store.localPeerId,
@@ -607,7 +613,8 @@ final class ProtocolEngine {
       name: identity.name,
       platform: identity.platform,
       appVersion: identity.appVersion,
-      maxMessageSize: UInt32(maxMessageBytes))))
+      maxMessageSize: UInt32(maxMessageBytes),
+      nonceC: nonceC)))
   }
 
   /// 6.5: a central closes a link whose handshake doesn't finish in time. A
@@ -669,7 +676,7 @@ final class ProtocolEngine {
         return
       }
       resolveOtherLink(link) { [unowned self] in
-        let own = self.ownHello()
+        let own = self.ownHello(nonce: self.randomNonce(), nonceC: hello.nonce)
         link.ownHello = own
         link.tHello = Derivation.tHello(helloC: bytes, helloP: own)
         link.phase = .awaitAuth
@@ -680,7 +687,17 @@ final class ProtocolEngine {
       if link.phase == .done {
         return
       }
+      // A central that restarts its handshake on the same connection (the peer
+      // re-registered its GATT server) gets the answer to its previous HELLO too;
+      // using it would make AUTH fail as BAD_MAC.
+      if let echo = hello.nonceC, echo != link.ownNonce {
+        host.log("Ignored a HELLO answering an earlier one on link \(link.id)")
+        return
+      }
       if link.phase != .awaitHello {
+        if hello.nonceC != nil {
+          return
+        }
         // A peripheral never sends HELLO unprompted; start over.
         endSession(link)
         sendHello(link)
