@@ -59,4 +59,6 @@ flutter {
 
 dependencies {
     testImplementation("junit:junit:4.13.2")
+    // A real org.json for JVM tests (android.jar's is a stub); reads test_vectors/.
+    testImplementation("org.json:json:20250517")
 }
