@@ -1,7 +1,8 @@
 # BLE 메시지 프로토콜 v1
 
-> 상태: **설계만 끝났고 아직 구현하지 않았습니다.** 관련 TODO: 23번(17, 24번과도 연결).
-> 지금 구현은 메시지를 UTF-8 바이트 그대로 write 또는 notify 한 번으로 보냅니다. 이 문서의 프로토콜과는 호환되지 않습니다.
+> 상태: **Android에 구현했습니다**(14절의 1–5단계와 7단계). 6단계(`/control/media`)와 iOS는 아직입니다. 관련 TODO: 23번.
+> 구현하면서 기기에서 확인한 내용을 반영해 원래 설계에서 바뀐 곳이 있습니다. 4절(조각 최대 512바이트), 9절(연결된 링크가 살아 있는지 확인), 10절(`/ping`), 12절(확정된 채널 계약)입니다.
+> iOS 빌드는 아직 예전 방식(UTF-8 바이트를 write/notify 한 번으로 보냄, 예전 characteristic)이라 새 Android 빌드와 통신하지 못합니다.
 
 ## 1. 목표와 범위
 
@@ -58,12 +59,12 @@ ATT 패킷(write 하나 또는 notification 하나)마다 프레임 하나가 �
 | 1–4 | record 전체 길이 u32. `S=1, E=0`일 때만 있습니다 |
 | 나머지 | 조각 데이터 |
 
-- 조각 하나의 최대 크기(헤더 포함)는 그 링크의 ATT MTU − 3입니다.
+- 조각 하나의 최대 크기(헤더 포함)는 그 링크의 ATT MTU − 3이고, **512바이트를 넘지 않습니다.** ATT attribute 값은 최대 512바이트라서, MTU가 517이어도 514바이트 write는 거절됩니다(Android, invalid attribute value length).
 
   | 링크 | MTU를 얻는 곳 |
   |---|---|
   | Android client | `onMtuChanged` (`requestMtu(517)` 결과) |
-  | Android server | `BluetoothGattServerCallback.onMtuChanged`. 오지 않으면 23 |
+  | Android server | `BluetoothGattServerCallback.onMtuChanged`. 오지 않으면 같은 기기의 client 쪽 MTU, 그것도 없으면 23. MTU는 연결(ACL)마다 하나라 두 역할이 같이 씁니다. 이미 연결된 상태에서 구독한 central은 MTU를 다시 협상하지 않아서 server에는 `onMtuChanged`가 오지 않습니다 |
   | iOS central | `maximumWriteValueLength(for: .withoutResponse)`. `.withResponse`는 MTU와 상관없이 512(long write 한도)를 돌려주므로 쓰지 않습니다 |
   | iOS peripheral | `CBCentral.maximumUpdateValueLength` |
 
@@ -79,6 +80,7 @@ ATT 패킷(write 하나 또는 notification 하나)마다 프레임 하나가 �
 - 전송 방식: central은 지금처럼 write with response를 `GattOperationQueue`로 하나씩 보내고, peripheral은 notification을 씁니다. 모든 조각이 MTU − 3 이하이므로 long write(prepared write)는 더 이상 쓰지 않습니다.
 - `maxMessageSize`는 다시 합친 record의 최대 크기입니다. v1은 65,536바이트이고 HELLO로 교환합니다. 보내려는 record가 상대 값을 넘으면 보내지 않고 로컬에서 `TOO_LARGE`로 실패시킵니다.
 - MTU 협상을 못 해서 조각이 20바이트면 짧은 명령도 3조각이 됩니다(10절의 media 명령이 약 45바이트).
+- Android ↔ Android(MTU 517)에서 측정한 값: 3,000바이트 메시지가 ACK까지 약 0.5초입니다.
 
 ## 5. Record
 
@@ -319,20 +321,26 @@ ACK는 "도착했다"는 뜻입니다. 실행 결과는 따로 `REPLY` DATA로 �
 두 폰 사이에는 링크를 하나만 둡니다. 이미 C와 P로 연결된 기기가 반대 역할로 새로 연결하려고 하면, HELLO에서 같은 peerId가 확인되는 순간 새 연결을 실패시킵니다. 그래서 모든 record(ACK 포함)는 그 peer의 유일한 링크로 오갑니다.
 
 - 어느 쪽이든 같은 peerId의 링크가 둘이 된 것을 알게 되면 아래 규칙으로 남길 링크를 정합니다. P는 HELLO_c를 받았을 때, C는 HELLO_p를 받았을 때 알게 됩니다. 양쪽이 같은 규칙을 쓰므로 같은 결론이 납니다.
-  1. 세션이 맺어진 링크를 남깁니다. 먼저 연결된 쪽이 이깁니다.
+  1. 세션이 맺어진 링크를 남깁니다. 먼저 연결된 쪽이 이깁니다. **단, 그 링크가 살아 있을 때만입니다.** 새 링크의 핸드셰이크를 잠시 멈추고 기존 링크로 `/ping`(10절)을 보내서, 3초 안에 ACK가 오면 기존 링크를 남기고 새 링크를 실패시킵니다. ACK가 없으면 기존 링크를 버리고(C면 닫고, P면 쓰지 않음) 새 링크로 계속합니다.
   2. 둘 다 아직 핸드셰이크 중이면 low가 C인 링크를 남깁니다. 서로 동시에 자동 재연결한 경우입니다.
+- 1의 확인이 필요한 이유: Galaxy 폰은 시스템 서비스가 두 폰 사이의 Bluetooth 연결을 계속 붙잡고 있어서, 상대 앱이 종료돼도 이쪽에는 연결이 끊겼다는 알림이 오지 않습니다. 그러면 죽은 세션이 맺어진 링크로 남아 있고, 다시 시작한 상대 앱의 새 링크를 계속 거절하게 됩니다(기기에서 확인함).
+- 지는 링크는 언제나 아직 핸드셰이크 중이므로(두 번째 링크가 HELLO를 받은 시점에 정하므로), 세션이 맺어진 링크를 P가 말없이 버리는 일은 없습니다. P에서 핸드셰이크가 10초 안에 끝나지 않은 링크는 그 peer의 링크로 세지 않습니다. 그래야 C가 말없이 포기한 링크가 재연결을 막지 않습니다.
 - 지는 링크의 P는 HELLO_p 대신 REJECT(ALREADY_CONNECTED)를 보내고, 지는 링크의 C는 링크를 닫습니다.
 - ALREADY_CONNECTED로 끝난 C는 그 peer와 다른 링크가 있는 동안 재연결하지 않습니다. 남은 링크가 끊기면 다시 양쪽 모두 재연결 대상이 됩니다.
-- Android는 두 역할에서 deviceId(MAC)가 같습니다. 그래서 이미 server 쪽으로 연결된 기기에는 처음부터 `connectGatt`를 하지 않게 할 수 있습니다. 하지만 플랫폼이 섞이면 deviceId를 비교할 수 없으므로, 최종 판단은 peerId로 합니다.
+- Android는 두 역할에서 deviceId(MAC)가 같습니다. 그래서 이미 server 쪽으로 연결된 기기에는 처음부터 `connectGatt`를 하지 않습니다. 하지만 플랫폼이 섞이면 deviceId를 비교할 수 없으므로, 최종 판단은 peerId로 합니다.
+- Android에서 지는 링크의 C가 GATT client 연결까지 끊으면, 그 폰에 연결을 붙잡는 앱이 없어져 몇 초 뒤 Bluetooth 연결 전체가 끊기고 남은 링크도 같이 끊깁니다(GATT server 연결은 붙잡는 것으로 치지 않음). 그래서 프로토콜 링크만 닫고 client 연결은 남은 링크가 끝날 때까지 쓰지 않은 채로 둡니다.
 - 세션이 맺어진 시점이 양쪽에서 조금 엇갈리면, 드물게 두 링크가 모두 끊길 수 있습니다. 그때는 자동 재연결로 다시 하나가 맺어집니다.
 
 ## 10. 내장 기능
 
-### `/debug/chat`
+### `/ping`
 
-- payload는 UTF-8 텍스트이고, `ACK_REQ`를 붙입니다.
-- Dart의 `sendMessage`는 네이티브에서 이 path로 감싸서 보냅니다. `messageSent`는 ACK `OK`를 받았을 때, `messageFailed`는 그 밖의 결과일 때 보냅니다. Dart의 문자열 messageId는 네이티브가 프로토콜 msgId와 짝지어 관리합니다.
-- 개발용입니다. 프로토콜 검증이 끝나면 없앨 수 있습니다.
+- 링크가 살아 있는지 확인합니다(9절). payload는 비어 있고 `ACK_REQ`를 붙입니다. 받는 쪽 엔진이 대상에 넘기지 않고 바로 ACK `OK`를 보냅니다.
+- 보내는 쪽은 어떤 status의 ACK든 살아 있다는 뜻으로 받습니다. 그래서 `/ping`을 모르는 구현이 `UNSUPPORTED`로 답해도 됩니다. CAPS에는 넣지 않습니다.
+
+### `/debug/chat` (없앰)
+
+- 채팅 UI와 함께 없앴습니다. 텍스트를 주고받는 시험은 AIDL 테스트 앱(`test_app/`)이 합니다.
 
 ### `/control/media`
 
@@ -397,16 +405,16 @@ parcelable PeerInfo { String peerId; String name; boolean connected; }
 - 데이터 크기는 상대 `maxMessageSize`에서 헤더 크기를 뺀 값까지입니다(64KiB 수준이라 Binder 한도와는 상관없음).
 - 앱 개발자에게 알릴 것: 드물게 같은 메시지가 두 번 올 수 있으니 (peerId, msgId)로 거릅니다. `EXPIRED_UNCONFIRMED`는 상대가 받았을 수도 있다는 뜻입니다.
 
-## 12. 플랫폼 채널 변경 (예정)
+## 12. 플랫폼 채널 변경
 
-구현할 때 `CLAUDE.md`의 채널 계약과 세 플랫폼의 코드를 같이 바꿉니다. 이름은 구현하면서 확정합니다.
+구현한 계약은 `CLAUDE.md`의 Platform channel contract에 있습니다. 요약하면 이렇습니다.
 
-- `sendMessage`: 바깥 모양은 그대로이고, 네이티브가 `/debug/chat`으로 감쌉니다. `messageSent`는 "상대 앱이 받음"을 뜻하게 됩니다.
+- `sendMessage`, `message`, `messageSent`, `messageFailed`는 채팅 UI와 함께 없앴습니다.
 - `connected{deviceId, peerId, name}`: 세션이 맺어졌을 때 보냅니다.
-- `connectDevice{pair: true}`: 지금처럼 OS 페어링을 허용하는 것에 더해, 그 링크에서 PAIR_REQUEST를 보내도 된다는 뜻이 됩니다(6.3).
-- 새 이벤트: `pairingRequest{deviceId, peerId, name, code, repair}`(양쪽 모두), `pairingResult{deviceId, peerId, result}`, `peerRejected{deviceId, reason}`(REJECT reason, 6.5), `peerUnpaired{deviceId}`
-- 새 메서드: `respondPairing{deviceId, accept}`, `setDeviceName{name}`(iOS), 미디어 조작 메서드
-- `removeDevice`: 지금의 `disconnectDevice`에 더해 UNPAIR를 보내고 K를 지웁니다.
+- `connectDevice{pair: true}`: OS 페어링을 허용하는 것에 더해, 그 링크에서 PAIR_REQUEST를 보내도 된다는 뜻입니다(6.3).
+- 새 이벤트: `peers{peers}`(앱 페어링한 peer 전체 목록, 네이티브가 관리), `pairingRequest{deviceId, peerId, name, code, repair}`(양쪽 모두), `pairingResult{deviceId, peerId, result}`, `peerRejected{deviceId, reason, byPeer}`(REJECT reason, 6.5), `peerUnpaired{deviceId}`
+- 새 메서드: `respondPairing{deviceId, accept}`, `removeDevice{deviceId}`(지금의 `disconnectDevice`를 대신하고, UNPAIR를 보내고 K를 지움)
+- 아직 없음: `setDeviceName{name}`(iOS), 미디어 조작 메서드
 
 ## 13. 보안 범위
 
@@ -430,13 +438,15 @@ parcelable PeerInfo { String peerId; String name; boolean connected; }
 
 단계마다 기기에서 확인할 수 있게 나눕니다.
 
-1. **코덱과 암호 함수**: Frame 분할·재조립, record와 envelope 인코딩, TLV, HMAC/HKDF/AES-GCM/ECDH 래퍼를 BLE 코드와 분리된 순수 클래스로 만듭니다. Kotlin은 JVM 테스트(`GattOperationQueue`처럼), Swift는 `RunnerTests`로 검증합니다. 두 구현은 같은 테스트 벡터 파일(예: `test_vectors/protocol_v1.json`)을 씁니다.
-2. **Frame + HELLO + peer당 링크 하나**: 채팅을 Frame 위로 옮깁니다. 이 단계에서만 임시로 평문 DATA를 허용하고, 4단계에서 없앱니다. 17번의 512바이트 제한, `(Unknown)` 이름 문제, 24번(이중 링크)이 풀립니다.
-3. **앱 페어링 + AUTH**: PAIR_REQUEST, 승인 화면, 확인 코드, 키 저장, REJECT 처리
-4. **SEALED**: 평문 DATA를 없앱니다
-5. **ACK, 중복 제거, 재전송, TTL, 흐름 제어**: `messageSent`가 "상대가 받음"을 뜻하게 됩니다
-6. **CAPS + `/control/media`** (Android): 첫 실제 명령
-7. **AIDL 서비스**
+1. ✅ (Android) **코덱과 암호 함수**: Frame 분할·재조립, record와 envelope 인코딩, TLV, HMAC/HKDF/AES-GCM/ECDH 래퍼를 BLE 코드와 분리된 순수 클래스로 만듭니다(`android/.../protocol/`). Kotlin은 JVM 테스트(RFC 4231/5869 벡터 포함)로 검증합니다. Swift는 `RunnerTests`로 검증하고, 두 구현이 같은 테스트 벡터 파일(예: `test_vectors/protocol_v1.json`)을 쓰게 합니다(iOS를 구현할 때).
+2. ✅ (Android) **Frame + HELLO + peer당 링크 하나**. 채팅은 옮기지 않고 없앴습니다.
+3. ✅ (Android) **앱 페어링 + AUTH**: PAIR_REQUEST, 승인 화면, 확인 코드, 키 저장(Keystore), REJECT 처리
+4. ✅ (Android) **SEALED**
+5. ✅ (Android) **ACK, 중복 제거, 재전송, TTL, 흐름 제어**
+6. **CAPS** ✅ + `/control/media` (Android): 첫 실제 명령. CAPS만 구현했습니다.
+7. ✅ (Android) **AIDL 서비스**와 테스트 앱(`test_app/`)
+
+2–5단계는 따로 나누지 않고 함께 구현했습니다. 상태 기계(`ProtocolEngine`)는 BLE와 분리돼 있어서, 두 엔진을 메모리 안의 네트워크로 이은 JVM 테스트로 대부분의 흐름을 기기 없이 확인합니다.
 
 호환성: 지금 빌드와는 호환되지 않으므로, 2단계에서 message characteristic UUID를 바꾸는 것을 권합니다. 그러면 예전 빌드와 새 빌드가 섞여 있을 때 엉뚱한 데이터를 해석하는 대신 그냥 연결되지 않습니다.
 
@@ -446,7 +456,7 @@ parcelable PeerInfo { String peerId; String name; boolean connected; }
 - iOS에서 같은 기기가 central일 때와 peripheral일 때 identifier가 같은지. 같다면 iOS에서도 deviceId로 두 번째 연결을 미리 막을 수 있습니다(9절)
 - iOS 승인 화면: 지금은 포그라운드일 때만 가능합니다. 알림 흐름이 생기면 백그라운드에서도 받을 수 있습니다
 - 서명 키 교체(APK Signature Scheme v3 rotation): v1은 현재 서명자만 비교합니다. 한쪽만 업데이트되면 두 폰의 해시가 달라져 `DENIED`가 됩니다
-- Keystore HMAC 키 가져오기(`KeyProtection`)가 대상 기기(Samsung 등)에서 문제 없는지
+- ~~Keystore HMAC 키 가져오기(`KeyProtection`)가 대상 기기(Samsung 등)에서 문제 없는지~~ Galaxy Z Fold5, S23(Android 17)에서 문제 없음. 실패하면 앱 prefs에 저장하고 로그를 남깁니다
 - 시간 제한, 윈도우, 대기열 크기 같은 숫자: 기기에서 측정한 뒤 조정합니다
 - store-and-forward가 필요한지
 - peer별로 "원격 조작"과 "앱 간 통신"을 따로 허용하는 토글이 필요한지
