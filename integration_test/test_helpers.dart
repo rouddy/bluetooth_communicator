@@ -64,3 +64,17 @@ Future<void> ensureBleModesEnabled(WidgetTester tester) async {
   await tester.pageBack();
   await tester.pumpAndSettle();
 }
+
+/// Sets the name peers see (iOS's 기기 이름 setting), then returns to the device list.
+Future<void> setDeviceName(WidgetTester tester, String name) async {
+  await tester.tap(find.byIcon(Icons.settings));
+  await tester.pumpAndSettle();
+  await tester.tap(find.text('기기 이름'));
+  await tester.pumpAndSettle();
+  // Not enterText: on a device the integration binding uses the real keyboard.
+  tester.widget<TextField>(find.byType(TextField)).controller!.text = name;
+  await tester.tap(find.text('저장'));
+  await tester.pumpAndSettle();
+  await tester.pageBack();
+  await tester.pumpAndSettle();
+}

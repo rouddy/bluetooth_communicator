@@ -12,6 +12,7 @@ const String _bleEventsChannelName =
     'com.rouddy.bluetooth_communicator/bluetooth_events';
 const String _prefsAdvertisingEnabled = 'prefs_advertising_enabled';
 const String _prefsCentralEnabled = 'prefs_central_enabled';
+const String _prefsDeviceName = 'prefs_device_name';
 const String _prefsPairingLost = 'prefs_pairing_lost';
 
 /// Keys that are no longer used, deleted on launch: the removed chat's message
@@ -369,6 +370,16 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 
+  Future<void> _editDeviceName(BuildContext context) async {
+    final name = await showDialog<String>(
+      context: context,
+      builder: (_) => _DeviceNameDialog(initial: controller.deviceName),
+    );
+    if (name != null) {
+      await controller.setDeviceName(name);
+    }
+  }
+
   Widget _buildPage(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('설정')),
@@ -386,6 +397,15 @@ class _SettingsPageState extends State<SettingsPage> {
             value: controller.centralEnabled,
             onChanged: controller.setCentralEnabled,
           ),
+          if (BleAppController.canSetDeviceName)
+            ListTile(
+              leading: const Icon(Icons.badge_outlined),
+              title: const Text('기기 이름'),
+              subtitle: Text(
+                controller.deviceName.isEmpty ? 'iPhone (기본값)' : controller.deviceName,
+              ),
+              onTap: () => _editDeviceName(context),
+            ),
           ListTile(
             leading: const Icon(Icons.radar),
             title: const Text('즉시 스캔 실행'),
@@ -448,6 +468,49 @@ class _SettingsPageState extends State<SettingsPage> {
             ),
         ],
       ),
+    );
+  }
+}
+
+class _DeviceNameDialog extends StatefulWidget {
+  const _DeviceNameDialog({required this.initial});
+
+  final String initial;
+
+  @override
+  State<_DeviceNameDialog> createState() => _DeviceNameDialogState();
+}
+
+class _DeviceNameDialogState extends State<_DeviceNameDialog> {
+  late final TextEditingController _field = TextEditingController(text: widget.initial);
+
+  @override
+  void dispose() {
+    _field.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('기기 이름'),
+      content: TextField(
+        controller: _field,
+        autofocus: true,
+        maxLength: 30,
+        decoration: const InputDecoration(hintText: 'iPhone'),
+        onSubmitted: (value) => Navigator.of(context).pop(value),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('취소'),
+        ),
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(_field.text),
+          child: const Text('저장'),
+        ),
+      ],
     );
   }
 }
@@ -602,6 +665,13 @@ class BleAppController extends ChangeNotifier {
 
   bool advertisingEnabled = false;
   bool centralEnabled = false;
+
+  /// The name peers see (HELLO, advertising). iOS only: since iOS 16 an app reads
+  /// every phone's name as "iPhone", so the user sets one. Empty means the default.
+  String deviceName = '';
+
+  /// Whether this platform lets the user name the device ([deviceName]).
+  static bool get canSetDeviceName => defaultTargetPlatform == TargetPlatform.iOS;
   /// The last native status; null until the first status event.
   BleStatus? status;
 
@@ -774,6 +844,9 @@ class BleAppController extends ChangeNotifier {
     }
     lastError = null;
     await _invoke('initialize');
+    if (canSetDeviceName && deviceName.isNotEmpty) {
+      await _invoke('setDeviceName', {'name': deviceName});
+    }
     if (advertisingEnabled) {
       await _invoke('setAdvertisingEnabled', {'enabled': true});
     }
@@ -805,6 +878,13 @@ class BleAppController extends ChangeNotifier {
 
   Future<void> scanNow() async {
     await _invoke('scanNow');
+  }
+
+  Future<void> setDeviceName(String name) async {
+    deviceName = name.trim();
+    await _prefs?.setString(_prefsDeviceName, deviceName);
+    notifyListeners();
+    await _invoke('setDeviceName', {'name': deviceName});
   }
 
   final Set<String> _connectingDeviceIds = <String>{};
@@ -1140,6 +1220,12 @@ class BleAppController extends ChangeNotifier {
           _reportError(message);
         }
         break;
+      case 'log':
+        // Native protocol and Bluetooth decisions, for debugging on a device.
+        if (!kReleaseMode && event['message'] is String) {
+          debugPrint('[native] ${event['message']}');
+        }
+        return;
       default:
         break;
     }
@@ -1153,6 +1239,7 @@ class BleAppController extends ChangeNotifier {
     }
     advertisingEnabled = prefs.getBool(_prefsAdvertisingEnabled) ?? false;
     centralEnabled = prefs.getBool(_prefsCentralEnabled) ?? false;
+    deviceName = prefs.getString(_prefsDeviceName) ?? '';
     // initialize() can run again (permission retry); the in-memory state is newer
     // than what's stored by then.
     if (!_stateLoaded) {

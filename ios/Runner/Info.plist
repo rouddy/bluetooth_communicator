@@ -27,9 +27,9 @@
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>백그라운드에서 주변 기기 검색, 연결, 메시지 송수신을 위해 블루투스를 사용합니다.</string>
+	<string>백그라운드에서도 페어링한 기기를 찾아 연결하고 통신하기 위해 블루투스를 사용합니다.</string>
 	<key>NSBluetoothPeripheralUsageDescription</key>
-	<string>이 앱은 주변 기기에 메시지 전달을 위해 블루투스를 사용합니다.</string>
+	<string>페어링한 기기와 통신하기 위해 블루투스를 사용합니다.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

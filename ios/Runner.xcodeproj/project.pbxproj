@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		3AB9133377F63CE4BD647C3E /* IOSPeerStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 91AF0DBA8B3FBEEAF1B46056 /* IOSPeerStore.swift */; };
 		95344A6B321E0E40C762D92B /* EngineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD5BC970498535E648701B84 /* EngineTests.swift */; };
 		DAFF310809C1F95A3A77A72B /* EngineHarness.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29175F5D6638DF868305D5AD /* EngineHarness.swift */; };
 		08D56AEE6424369E00BAF394 /* VectorsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 385F6689688E1DA644396943 /* VectorsTests.swift */; };
@@ -52,6 +53,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		91AF0DBA8B3FBEEAF1B46056 /* IOSPeerStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IOSPeerStore.swift; sourceTree = "<group>"; };
 		BD5BC970498535E648701B84 /* EngineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineTests.swift; sourceTree = "<group>"; };
 		29175F5D6638DF868305D5AD /* EngineHarness.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineHarness.swift; sourceTree = "<group>"; };
 		385F6689688E1DA644396943 /* VectorsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VectorsTests.swift; sourceTree = "<group>"; };
@@ -152,6 +154,7 @@
 		97C146F01CF9000F007C117D /* Runner */ = {
 			isa = PBXGroup;
 			children = (
+				91AF0DBA8B3FBEEAF1B46056 /* IOSPeerStore.swift */,
 				305D078B1B61BABB936C7BA3 /* Protocol */,
 				97C146FA1CF9000F007C117D /* Main.storyboard */,
 				97C146FD1CF9000F007C117D /* Assets.xcassets */,
@@ -323,6 +326,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				3AB9133377F63CE4BD647C3E /* IOSPeerStore.swift in Sources */,
 				29ED770145C40B4F2CEA8825 /* Engine.swift in Sources */,
 				62C97C7590A311A78F8D99BD /* Crypto.swift in Sources */,
 				36C9A87BF2264EE56DDCBD8D /* Envelopes.swift in Sources */,
