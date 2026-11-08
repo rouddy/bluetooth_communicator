@@ -46,12 +46,25 @@ void main() {
     await tester.pump();
   }
 
+  Future<void> peerList(WidgetTester tester) async {
+    await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+      _eventsChannel.name,
+      const StandardMethodCodec().encodeSuccessEnvelope({
+        'type': 'peers',
+        'peers': [
+          {'deviceId': 'AA:AA', 'name': 'Peer', 'peerId': 'p', 'state': 'paired', 'connected': false},
+        ],
+      }),
+      (_) {},
+    );
+    await tester.pump();
+  }
+
   testWidgets('a lost pairing is explained, remembered, and cleared by a new '
       'connection', (tester) async {
-    SharedPreferences.setMockInitialValues({
-      'prefs_registered_devices': '[{"identifier":"AA:AA","name":"Peer"}]',
-    });
+    SharedPreferences.setMockInitialValues({});
     await startApp(tester);
+    await peerList(tester);
     await nativeEvent(tester, 'connected');
 
     await nativeEvent(tester, 'bondLost');
@@ -64,6 +77,7 @@ void main() {
     final restarted = BleAppController();
     await tester.pumpWidget(MyApp(controller: restarted));
     await restarted.initialize();
+    await peerList(tester);
     await tester.pumpAndSettle();
     expect(restarted.linkStateFor('AA:AA'), LinkState.pairingLost);
 

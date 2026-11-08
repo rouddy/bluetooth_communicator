@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- ble_identity holds this install's peerId and its paired peers. A restored copy
+     would make two phones with one peerId, and the pairing keys live in the
+     Keystore, which isn't backed up anyway (docs/protocol.md 6.6). -->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="sharedpref" path="ble_identity.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="ble_identity.xml" />
+    </device-transfer>
+</data-extraction-rules>

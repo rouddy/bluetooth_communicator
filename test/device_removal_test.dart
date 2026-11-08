@@ -33,17 +33,31 @@ void main() {
       messenger.setMockStreamHandler(_eventsChannel, null);
     });
     PermissionHandlerPlatform.instance = FakePermissionHandler();
-    SharedPreferences.setMockInitialValues({
-      'prefs_registered_devices':
-          '[{"identifier":"AA:BB:CC:DD:EE:FF","name":"Old phone"}]',
-    });
+    SharedPreferences.setMockInitialValues({});
     final controller = BleAppController();
     await tester.pumpWidget(MyApp(controller: controller));
     await controller.initialize();
+    await messenger.handlePlatformMessage(
+      _eventsChannel.name,
+      const StandardMethodCodec().encodeSuccessEnvelope({
+        'type': 'peers',
+        'peers': [
+          {
+            'deviceId': 'AA:BB:CC:DD:EE:FF',
+            'name': 'Old phone',
+            'peerId': '00112233-4455-6677-8899-aabbccddeeff',
+            'state': 'paired',
+            'connected': false,
+          },
+        ],
+      }),
+      (_) {},
+    );
     await tester.pumpAndSettle();
 
     await tester.tap(find.text('Old phone'));
     await tester.pumpAndSettle();
+    expect(find.text('00112233-4455-6677-8899-aabbccddeeff'), findsOneWidget);
     await tester.tap(find.byTooltip('기기 삭제'));
     await tester.pumpAndSettle();
     expect(find.text('기기 삭제'), findsOneWidget);
@@ -54,7 +68,8 @@ void main() {
     expect(find.text('기기 목록'), findsOneWidget);
     expect(find.text('Old phone'), findsNothing);
     expect(find.text('연결 기록이 있는 기기가 없습니다.'), findsOneWidget);
-    expect(nativeCalls.last.method, 'disconnectDevice');
+    expect(nativeCalls.last.method, 'removeDevice');
+    expect(nativeCalls.last.arguments, {'deviceId': 'AA:BB:CC:DD:EE:FF'});
   });
 
   testWidgets('a nearby device that was never registered has no delete '

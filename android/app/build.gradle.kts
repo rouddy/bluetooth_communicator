@@ -11,6 +11,11 @@ android {
     compileSdk = 37
     ndkVersion = flutter.ndkVersion
 
+    // The AIDL service other apps bind to (docs/protocol.md 11절).
+    buildFeatures {
+        aidl = true
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -54,4 +59,6 @@ flutter {
 
 dependencies {
     testImplementation("junit:junit:4.13.2")
+    // A real org.json for JVM tests (android.jar's is a stub); reads test_vectors/.
+    testImplementation("org.json:json:20250517")
 }

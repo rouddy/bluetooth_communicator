@@ -48,6 +48,14 @@ void main() {
     messenger.setMockStreamHandler(_eventsChannel, null);
   });
 
+  Future<void> nativeEvent(Map<String, dynamic> event) {
+    return messenger.handlePlatformMessage(
+      _eventsChannel.name,
+      const StandardMethodCodec().encodeSuccessEnvelope(event),
+      (_) {},
+    );
+  }
+
   group('BleStatus', () {
     BleStatus status({
       bool advertising = false,
@@ -111,7 +119,8 @@ void main() {
   });
 
   group('initialize', () {
-    test('replays saved modes and registered devices to native code', () async {
+    test('replays saved modes to native code, which reconnects the peers '
+        'itself', () async {
       registerNativeHandler();
       SharedPreferences.setMockInitialValues({
         'prefs_advertising_enabled': true,
@@ -122,19 +131,19 @@ void main() {
       final controller = BleAppController();
 
       await controller.initialize();
+      await pumpEventQueue();
 
       expect(nativeCalls.map((c) => c.method), [
         'initialize',
         'setAdvertisingEnabled',
         'setCentralEnabled',
         'scanNow',
-        'connectDevice',
       ]);
-      // Replaying saved devices must never trigger the pairing dialog.
-      final connectArgs = nativeCalls.last.arguments as Map;
-      expect(connectArgs['deviceId'], 'AA:BB:CC:DD:EE:FF');
-      expect(connectArgs['pair'], isNot(true));
       expect(controller.lastError, isNull);
+      // The old Dart-side device list is gone; native code keeps the peers.
+      expect(controller.registeredDevices, isEmpty);
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getKeys(), isNot(contains('prefs_registered_devices')));
     });
 
     test('skips native calls and reports an error when permissions are '
@@ -154,190 +163,20 @@ void main() {
     });
   });
 
-  group('sendMessage', () {
-    Future<void> nativeEvent(Map<String, dynamic> event) {
-      return messenger.handlePlatformMessage(
-        _eventsChannel.name,
-        const StandardMethodCodec().encodeSuccessEnvelope(event),
-        (_) {},
-      );
-    }
-
-    test('shows the message as sending until native code reports the '
-        'outcome', () async {
-      registerNativeHandler();
-      final controller = BleAppController();
-      await controller.initialize();
-
-      await controller.sendMessage('AA:AA', 'first');
-      await controller.sendMessage('AA:AA', 'second');
-      final [first, second] = controller.messagesByDevice['AA:AA']!;
-      expect([first.status, second.status], [
-        MessageStatus.sending,
-        MessageStatus.sending,
-      ]);
-      final sendCall = nativeCalls.lastWhere((c) => c.method == 'sendMessage');
-      expect(sendCall.arguments, {
-        'deviceId': 'AA:AA',
-        'message': 'second',
-        'messageId': second.id,
-      });
-      expect(first.id, isNot(second.id));
-
-      await nativeEvent({
-        'type': 'messageFailed',
-        'deviceId': 'AA:AA',
-        'messageId': second.id,
-        'error': 'Write failed (status 133)',
-      });
-      await nativeEvent({
-        'type': 'messageSent',
-        'deviceId': 'AA:AA',
-        'messageId': first.id,
-      });
-
-      expect(first.status, MessageStatus.sent);
-      expect(first.statusLabel, 'Sent');
-      expect(second.status, MessageStatus.failed);
-      expect(second.statusLabel, '전송 실패: Write failed (status 133)');
-    });
-
-    test('fails the message when native code rejects the call', () async {
-      messenger.setMockMethodCallHandler(_controlChannel, (call) async {
-        if (call.method == 'sendMessage') {
-          throw PlatformException(
-            code: 'SERVICE_UNAVAILABLE',
-            message: 'Bluetooth service unavailable',
-          );
-        }
-        return null;
-      });
-      final controller = BleAppController();
-      await controller.initialize();
-
-      await controller.sendMessage('AA:AA', 'hello');
-
-      final message = controller.messagesByDevice['AA:AA']!.single;
-      expect(message.status, MessageStatus.failed);
-      expect(message.error, contains('Bluetooth service unavailable'));
-    });
-  });
-
-  test('a message delivered late keeps the time it arrived natively', () async {
+  test('the removed chat history is deleted from storage', () async {
     registerNativeHandler();
+    SharedPreferences.setMockInitialValues({
+      'prefs_messages': '{"AA:AA":[{"text":"hi"}]}',
+      'prefs_unread_counts': '{"AA:AA":1}',
+    });
     final controller = BleAppController();
+
     await controller.initialize();
-    final arrived = DateTime(2026, 10, 15, 16, 3, 53);
+    await pumpEventQueue();
 
-    await messenger.handlePlatformMessage(
-      _eventsChannel.name,
-      const StandardMethodCodec().encodeSuccessEnvelope({
-        'type': 'message',
-        'deviceId': 'AA:AA',
-        'message': 'while closed',
-        'receivedAt': arrived.millisecondsSinceEpoch,
-      }),
-      (_) {},
-    );
-
-    final message = controller.messagesByDevice['AA:AA']!.single;
-    expect(message.text, 'while closed');
-    expect(message.timestamp, arrived);
-    expect(controller.unreadCountFor('AA:AA'), 1);
-  });
-
-  group('message history', () {
-    Future<void> incoming(String deviceId, String text) {
-      return messenger.handlePlatformMessage(
-        _eventsChannel.name,
-        const StandardMethodCodec().encodeSuccessEnvelope({
-          'type': 'message',
-          'deviceId': deviceId,
-          'message': text,
-        }),
-        (_) {},
-      );
-    }
-
-    test('survives a restart, including unread counts and send status', () async {
-      registerNativeHandler();
-      final first = BleAppController();
-      await first.initialize();
-      await incoming('AA:AA', 'hi');
-      await first.sendMessage('AA:AA', 'reply');
-      final reply = first.messagesByDevice['AA:AA']!.last;
-      await messenger.handlePlatformMessage(
-        _eventsChannel.name,
-        const StandardMethodCodec().encodeSuccessEnvelope({
-          'type': 'messageSent',
-          'deviceId': 'AA:AA',
-          'messageId': reply.id,
-        }),
-        (_) {},
-      );
-      await pumpEventQueue();
-
-      // A new controller over the same storage, like the next app launch.
-      final restarted = BleAppController();
-      await restarted.initialize();
-
-      final messages = restarted.messagesByDevice['AA:AA']!;
-      expect(messages.map((m) => (m.text, m.outgoing, m.status)), [
-        ('hi', false, MessageStatus.sent),
-        ('reply', true, MessageStatus.sent),
-      ]);
-      expect(messages.last.id, reply.id);
-      expect(restarted.unreadCountFor('AA:AA'), 1);
-    });
-
-    test('a message still being sent when the app stopped comes back as '
-        'failed', () async {
-      registerNativeHandler();
-      final first = BleAppController();
-      await first.initialize();
-      await first.sendMessage('AA:AA', 'in flight');
-      await pumpEventQueue();
-
-      final restarted = BleAppController();
-      await restarted.initialize();
-
-      final message = restarted.messagesByDevice['AA:AA']!.single;
-      expect(message.status, MessageStatus.failed);
-      expect(message.statusLabel, contains('전송 결과를 알 수 없습니다'));
-    });
-
-    test('keeps only the newest messages per device', () async {
-      registerNativeHandler();
-      final first = BleAppController();
-      await first.initialize();
-      for (var i = 0; i < 205; i++) {
-        await incoming('AA:AA', 'm$i');
-      }
-      await pumpEventQueue();
-
-      final restarted = BleAppController();
-      await restarted.initialize();
-
-      final texts = restarted.messagesByDevice['AA:AA']!.map((m) => m.text);
-      expect(texts.length, 200);
-      expect(texts.first, 'm5');
-      expect(texts.last, 'm204');
-    });
-
-    test('deleting a device also deletes its stored messages', () async {
-      registerNativeHandler();
-      final first = BleAppController();
-      await first.initialize();
-      await incoming('AA:AA', 'hi');
-      await first.removeDevice('AA:AA');
-      await pumpEventQueue();
-
-      final restarted = BleAppController();
-      await restarted.initialize();
-
-      expect(restarted.messagesByDevice['AA:AA'], isNull);
-      expect(restarted.unreadCountFor('AA:AA'), 0);
-    });
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.getKeys(), isNot(contains('prefs_messages')));
+    expect(prefs.getKeys(), isNot(contains('prefs_unread_counts')));
   });
 
   group('nearby devices', () {
@@ -391,41 +230,169 @@ void main() {
   });
 
   group('removeDevice', () {
-    test('forgets the device, persists it, and disconnects it natively', () async {
+    test('forgets the device and asks native code to remove it', () async {
       registerNativeHandler();
-      SharedPreferences.setMockInitialValues({
-        'prefs_registered_devices':
-            '[{"identifier":"AA:AA","name":"keep"},'
-            '{"identifier":"BB:BB","name":"remove"}]',
-      });
       final controller = BleAppController();
       await controller.initialize();
-      final events = <Map<String, dynamic>>[
-        {'type': 'connected', 'deviceId': 'BB:BB'},
-        {'type': 'message', 'deviceId': 'BB:BB', 'message': 'hi'},
-      ];
-      for (final event in events) {
-        await messenger.handlePlatformMessage(
-          _eventsChannel.name,
-          const StandardMethodCodec().encodeSuccessEnvelope(event),
-          (_) {},
-        );
-      }
+      await nativeEvent({
+        'type': 'peers',
+        'peers': [
+          {'deviceId': 'AA:AA', 'name': 'keep', 'peerId': 'a', 'state': 'paired', 'connected': false},
+          {'deviceId': 'BB:BB', 'name': 'remove', 'peerId': 'b', 'state': 'paired', 'connected': true},
+        ],
+      });
       expect(controller.isKnownDevice('BB:BB'), isTrue);
-      expect(controller.unreadCountFor('BB:BB'), 1);
+      expect(controller.linkStateFor('BB:BB'), LinkState.connected);
       nativeCalls.clear();
 
       await controller.removeDevice('BB:BB');
 
       expect(controller.isKnownDevice('BB:BB'), isFalse);
       expect(controller.allKnownDevices.map((d) => d.identifier), ['AA:AA']);
-      expect(controller.messagesByDevice['BB:BB'], isNull);
-      expect(controller.unreadCountFor('BB:BB'), 0);
-      expect(nativeCalls.single.method, 'disconnectDevice');
+      expect(nativeCalls.single.method, 'removeDevice');
       expect(nativeCalls.single.arguments, {'deviceId': 'BB:BB'});
-      // The Android service reads this list to decide what to reconnect.
-      final prefs = await SharedPreferences.getInstance();
-      expect(prefs.getString('prefs_registered_devices'), isNot(contains('BB:BB')));
+    });
+  });
+
+  group('peers', () {
+    test('the list comes from native code, with each peer\'s state', () async {
+      registerNativeHandler();
+      final controller = BleAppController();
+      await controller.initialize();
+
+      await nativeEvent({
+        'type': 'peers',
+        'peers': [
+          {'deviceId': 'AA', 'name': 'A', 'peerId': 'pa', 'state': 'paired', 'connected': false},
+          {'deviceId': 'BB', 'name': 'B', 'peerId': 'pb', 'state': 'repairNeeded', 'connected': false},
+          {'deviceId': 'CC', 'name': 'C', 'peerId': 'pc', 'state': 'badMac', 'connected': false},
+          {'deviceId': 'DD', 'name': 'D', 'peerId': 'pd', 'state': 'unpairedByPeer', 'connected': false},
+        ],
+      });
+
+      expect(controller.registeredDevices.map((d) => d.name), ['A', 'B', 'C', 'D']);
+      expect(controller.peerFor('AA')?.peerId, 'pa');
+      expect(
+        ['AA', 'BB', 'CC', 'DD'].map(controller.linkLabel),
+        ['연결 안 됨', '다시 연결 필요', '인증 실패', '상대가 연결을 해제함'],
+      );
+    });
+
+    test('a session takes the name the peer announced', () async {
+      registerNativeHandler();
+      final controller = BleAppController();
+      await controller.initialize();
+
+      await nativeEvent({
+        'type': 'connected',
+        'deviceId': 'AA',
+        'peerId': 'pa',
+        'name': '재홍의 S23',
+      });
+
+      expect(controller.allKnownDevices.single.name, '재홍의 S23');
+      expect(controller.linkStateFor('AA'), LinkState.connected);
+    });
+
+    test('rejections and unpairing are explained', () async {
+      registerNativeHandler();
+      final controller = BleAppController();
+      await controller.initialize();
+      final errors = <String>[];
+      controller.errors.listen(errors.add);
+      await nativeEvent({
+        'type': 'peers',
+        'peers': [
+          {'deviceId': 'AA', 'name': 'Peer', 'peerId': 'pa', 'state': 'paired', 'connected': false},
+        ],
+      });
+
+      await nativeEvent({'type': 'peerRejected', 'deviceId': 'AA', 'reason': 'unknownPeer', 'byPeer': true});
+      await nativeEvent({'type': 'peerRejected', 'deviceId': 'AA', 'reason': 'unknownPeer', 'byPeer': false});
+      await nativeEvent({'type': 'peerRejected', 'deviceId': 'AA', 'reason': 'badMac', 'byPeer': false});
+      await nativeEvent({'type': 'peerUnpaired', 'deviceId': 'AA'});
+      await pumpEventQueue();
+
+      expect(errors, [
+        'Peer에서 이 기기를 삭제했습니다. 다시 연결하려면 연결 버튼을 누르세요.',
+        'Peer의 인증에 실패했습니다. 보안을 위해 자동으로 다시 연결하지 않습니다.',
+        'Peer에서 연결을 해제했습니다.',
+      ]);
+    });
+  });
+
+  group('pairing', () {
+    test('a request waits for the user, then for the peer', () async {
+      registerNativeHandler();
+      final controller = BleAppController();
+      await controller.initialize();
+      final prompts = <PairingRequest>[];
+      controller.pairingPrompts.listen(prompts.add);
+      await controller.connectDevice('AA', pair: true);
+
+      await nativeEvent({
+        'type': 'pairingRequest',
+        'deviceId': 'AA',
+        'peerId': 'pa',
+        'name': 'Peer',
+        'code': '042517',
+        'repair': false,
+      });
+      await pumpEventQueue();
+
+      expect(prompts.single.code, '042517');
+      expect(controller.linkLabel('AA'), '승인 대기 중…');
+
+      nativeCalls.clear();
+      await controller.respondPairing('AA', true);
+      expect(nativeCalls.single.arguments, {'deviceId': 'AA', 'accept': true});
+      expect(controller.pairingRequests['AA']!.approved, isTrue);
+
+      await nativeEvent({'type': 'pairingResult', 'deviceId': 'AA', 'peerId': 'pa', 'result': 'paired'});
+      expect(controller.pairingRequests, isEmpty);
+      await nativeEvent({'type': 'connected', 'deviceId': 'AA', 'peerId': 'pa', 'name': 'Peer'});
+      expect(controller.linkStateFor('AA'), LinkState.connected);
+    });
+
+    testWidgets('the connect timeout doesn\'t run while the users decide', (
+      tester,
+    ) async {
+      registerNativeHandler();
+      final controller = BleAppController();
+      await controller.initialize();
+      await controller.connectDevice('AA', pair: true);
+      await nativeEvent({
+        'type': 'pairingRequest',
+        'deviceId': 'AA',
+        'peerId': 'pa',
+        'name': 'Peer',
+        'code': '042517',
+        'repair': false,
+      });
+
+      await tester.pump(BleAppController.connectingTimeout + const Duration(seconds: 5));
+
+      expect(controller.linkStateFor('AA'), LinkState.awaitingApproval);
+    });
+
+    test('a failed pairing says why and ends the connecting state', () async {
+      registerNativeHandler();
+      final controller = BleAppController();
+      await controller.initialize();
+      await controller.connectDevice('AA', pair: true);
+      await nativeEvent({
+        'type': 'pairingRequest',
+        'deviceId': 'AA',
+        'peerId': 'pa',
+        'name': 'Peer',
+        'code': '042517',
+        'repair': false,
+      });
+
+      await nativeEvent({'type': 'pairingResult', 'deviceId': 'AA', 'peerId': 'pa', 'result': 'rejected'});
+
+      expect(controller.lastError, 'Peer와(과)의 연결이 거절되었습니다.');
+      expect(controller.linkStateFor('AA'), LinkState.disconnected);
     });
   });
 

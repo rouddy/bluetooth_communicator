@@ -16,7 +16,6 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
-        BleEventBus.init(this)
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, methodChannelName)
             .setMethodCallHandler { call, result ->
@@ -66,25 +65,19 @@ class MainActivity : FlutterActivity() {
                         )
                         result.success(null)
                     }
-                    "disconnectDevice" -> {
+                    "removeDevice" -> {
                         startServiceAction(
-                            BluetoothBackgroundService.ACTION_DISCONNECT_DEVICE,
+                            BluetoothBackgroundService.ACTION_REMOVE_DEVICE,
                             call.argument<String>("deviceId")
                         )
                         result.success(null)
                     }
-                    "sendMessage" -> {
-                        val deviceId = call.argument<String>("deviceId")
-                        val message = call.argument<String>("message")
+                    "respondPairing" -> {
                         val started = startServiceAction(
-                            BluetoothBackgroundService.ACTION_SEND_MESSAGE,
-                            deviceId,
-                            message,
-                            messageId = call.argument<String>("messageId")
+                            BluetoothBackgroundService.ACTION_RESPOND_PAIRING,
+                            call.argument<String>("deviceId"),
+                            accept = call.argument<Boolean>("accept") == true
                         )
-                        // The service reports the outcome with messageSent/messageFailed;
-                        // if it never got the request, fail the call so Dart marks the
-                        // message as failed instead of leaving it pending.
                         if (started) {
                             result.success(null)
                         } else {
@@ -110,10 +103,11 @@ class MainActivity : FlutterActivity() {
     override fun onResume() {
         super.onResume()
         BleEventBus.appInForeground = true
-        // The messages are on screen now; clear their notifications.
+        // Pairing prompts show in the app now (replayed on attach); clear their
+        // notifications.
         val manager = getSystemService(NotificationManager::class.java)
         manager.activeNotifications
-            .filter { it.notification.channelId == BluetoothBackgroundService.MESSAGE_CHANNEL_ID }
+            .filter { it.notification.channelId == BleRuntime.PAIRING_CHANNEL_ID }
             .forEach { manager.cancel(it.tag, it.id) }
     }
 
@@ -123,8 +117,7 @@ class MainActivity : FlutterActivity() {
     }
 
     // When the activity is destroyed its engine goes with it, but the event channel's
-    // onCancel isn't called, so BleEventBus would keep sending to a dead sink and the
-    // events (incoming messages) would vanish. Detach so they're kept instead.
+    // onCancel isn't called, so BleEventBus would keep sending to a dead sink. Detach.
     override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
         BleEventBus.detach()
         super.cleanUpFlutterEngine(flutterEngine)
@@ -146,9 +139,8 @@ class MainActivity : FlutterActivity() {
     private fun startServiceAction(
         action: String,
         deviceId: String? = null,
-        message: String? = null,
         pair: Boolean = false,
-        messageId: String? = null
+        accept: Boolean = false
     ): Boolean {
         if (!hasBlePermissions()) {
             BleEventBus.emit(
@@ -165,15 +157,10 @@ class MainActivity : FlutterActivity() {
             if (deviceId != null) {
                 putExtra(BluetoothBackgroundService.EXTRA_DEVICE_ID, deviceId)
             }
-            if (message != null) {
-                putExtra(BluetoothBackgroundService.EXTRA_MESSAGE, message)
-            }
             if (pair) {
                 putExtra(BluetoothBackgroundService.EXTRA_PAIR, true)
             }
-            if (messageId != null) {
-                putExtra(BluetoothBackgroundService.EXTRA_MESSAGE_ID, messageId)
-            }
+            putExtra(BluetoothBackgroundService.EXTRA_ACCEPT, accept)
         }
         return try {
             startForegroundService(intent)

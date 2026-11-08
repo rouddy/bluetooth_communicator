@@ -9,7 +9,6 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.BroadcastReceiver
 import android.content.IntentFilter
-import android.content.SharedPreferences
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
@@ -41,15 +40,23 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.ParcelUuid
 import android.os.SystemClock
+import android.util.Log
 import androidx.core.app.NotificationCompat
-import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
-import org.json.JSONArray
-import java.io.ByteArrayOutputStream
+import com.rouddy.bluetooth_communicator.bluetooth_communicator.protocol.EngineEvent
+import com.rouddy.bluetooth_communicator.bluetooth_communicator.protocol.Frames
+import com.rouddy.bluetooth_communicator.bluetooth_communicator.protocol.Role
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
-class BluetoothBackgroundService : Service() {
+/**
+ * Owns advertising (with the GATT server), scanning, and GATT client connections, and
+ * carries the protocol's frames for [BleRuntime.engine]: one link per GATT client
+ * connection (we're central) and one per subscribed central (we're peripheral).
+ * Everything that touches the engine runs on the main looper, so GATT callbacks post
+ * their work there.
+ */
+class BluetoothBackgroundService : Service(), BleTransport {
     private val bluetoothManager by lazy {
         getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
     }
@@ -61,8 +68,24 @@ class BluetoothBackgroundService : Service() {
     private val scanner: BluetoothLeScanner?
         get() = adapter?.bluetoothLeScanner
 
+    private val engine
+        get() = BleRuntime.engine
+
     private val activeConnections = ConcurrentHashMap<String, BluetoothGatt>()
     private val writableCharacteristics = ConcurrentHashMap<String, BluetoothGattCharacteristic>()
+    private val clientMtus = ConcurrentHashMap<String, Int>()
+    // Client connections whose engine link was dropped (e.g. as a duplicate) while
+    // the peer stays linked to our GATT server. Android releases the Bluetooth
+    // connection once no app on this phone holds it as a GATT client (the server
+    // doesn't count), which would take the remaining link down a few seconds later.
+    // So they stay open, unused, and are reused or closed when that link ends.
+    private val idleClients = ConcurrentHashMap<String, BluetoothGatt>()
+
+    // Addresses the user asked to connect to (the 연결 button). Only those links may
+    // start an app pairing (6.3). Kept for the whole connection, since the peer
+    // re-registering its GATT server (onServiceChanged) restarts the handshake on it;
+    // cleared once a session is up or the connection ends.
+    private val userInitiated = ConcurrentHashMap.newKeySet<String>()
     // connectGatt() calls that haven't connected yet, kept so they can be cancelled. A
     // pending autoConnect would otherwise complete whenever the device shows up again.
     private val pendingConnections = ConcurrentHashMap<String, BluetoothGatt>()
@@ -78,7 +101,15 @@ class BluetoothBackgroundService : Service() {
     private var serverCharacteristic: BluetoothGattCharacteristic? = null
     private val subscribedCentrals = ConcurrentHashMap<String, BluetoothDevice>()
     private val centralMtus = ConcurrentHashMap<String, Int>()
-    private val preparedWrites = ConcurrentHashMap<String, ByteArrayOutputStream>()
+
+    // Engine links. A peer reached in both roles has two GATT links (the engine
+    // keeps one of them, 9절); they're told apart by role.
+    private data class LinkTarget(val address: String, val role: Role)
+
+    private val linkTargets = ConcurrentHashMap<Int, LinkTarget>()
+    private val clientLinkIds = ConcurrentHashMap<String, Int>()
+    private val serverLinkIds = ConcurrentHashMap<String, Int>()
+    private var nextLinkId = 1
 
     // One operation queue per link and role: our client link to a peer, and a central's
     // link to our GATT server.
@@ -125,9 +156,8 @@ class BluetoothBackgroundService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        BleEventBus.init(this)
-        getSharedPreferences(FLUTTER_PREFS_NAME, Context.MODE_PRIVATE)
-            .registerOnSharedPreferenceChangeListener(flutterPrefsListener)
+        BleRuntime.init(this)
+        BleRuntime.transport = this
         BleEventBus.foregroundListener = {
             handler.removeCallbacks(applyScanMode)
             handler.postDelayed(applyScanMode, SCAN_MODE_DEBOUNCE_MS)
@@ -175,7 +205,7 @@ class BluetoothBackgroundService : Service() {
         when (intent?.action ?: ACTION_RESTORE) {
             ACTION_RESTORE -> {
                 restoreStateFromPrefs()
-                emitCurrentConnections()
+                BleRuntime.replay()
                 // A newly attached Dart side has an empty nearby list; report everything
                 // again instead of only changes.
                 reportedNearby.clear()
@@ -207,16 +237,9 @@ class BluetoothBackgroundService : Service() {
                 intent?.getStringExtra(EXTRA_DEVICE_ID),
                 intent?.getBooleanExtra(EXTRA_PAIR, false) == true
             )
-            ACTION_DISCONNECT_DEVICE -> disconnectDevice(intent?.getStringExtra(EXTRA_DEVICE_ID))
-            ACTION_SEND_MESSAGE -> {
-                val deviceId = intent?.getStringExtra(EXTRA_DEVICE_ID)
-                val message = intent?.getStringExtra(EXTRA_MESSAGE)
-                val messageId = intent?.getStringExtra(EXTRA_MESSAGE_ID)
-                if (!deviceId.isNullOrBlank() && !message.isNullOrBlank()) {
-                    sendMessage(deviceId, message, messageId)
-                } else if (!deviceId.isNullOrBlank()) {
-                    reportSend(deviceId, messageId, false, "Empty message")
-                }
+            ACTION_REMOVE_DEVICE -> removeDevice(intent?.getStringExtra(EXTRA_DEVICE_ID))
+            ACTION_RESPOND_PAIRING -> intent?.getStringExtra(EXTRA_DEVICE_ID)?.let {
+                engine.respondPairing(it, intent.getBooleanExtra(EXTRA_ACCEPT, false))
             }
         }
         emitStatus()
@@ -234,8 +257,7 @@ class BluetoothBackgroundService : Service() {
         disconnectAll()
         runCatching { unregisterReceiver(bondStateReceiver) }
         runCatching { unregisterReceiver(adapterStateReceiver) }
-        getSharedPreferences(FLUTTER_PREFS_NAME, Context.MODE_PRIVATE)
-            .unregisterOnSharedPreferenceChangeListener(flutterPrefsListener)
+        BleRuntime.transport = null
         BleEventBus.foregroundListener = null
         handler.removeCallbacks(applyScanMode)
         super.onDestroy()
@@ -253,62 +275,44 @@ class BluetoothBackgroundService : Service() {
         }
     }
 
-    // The service outlives the Flutter activity, so a newly attached Dart side has to be
-    // told about links that were established before it started listening.
-    private fun emitCurrentConnections() {
-        (activeConnections.keys + subscribedCentrals.keys).forEach { address ->
-            BleEventBus.emit(
-                mapOf(
-                    "type" to "connected",
-                    "deviceId" to address
-                )
-            )
-        }
-    }
-
+    // Automatic connects (on restore, scan results, and disconnects) only target
+    // app-paired peers the engine has no link to (6.3, 9절), and only bonded ones:
+    // the bond keeps their address stable and the link encrypted.
     @SuppressLint("MissingPermission")
     private fun reconnectBondedDevices() {
-        val knownDeviceIds = loadRegisteredDeviceIds()
-        if (knownDeviceIds.isEmpty()) {
-            return
-        }
-        val bondState = BluetoothDevice.BOND_BONDED
-        adapter?.bondedDevices
-            ?.filter { device ->
-                device.bondState == bondState && knownDeviceIds.contains(device.address)
-            }
-            ?.forEach { connectGattIfNeeded(it) }
+        adapter?.bondedDevices?.forEach(::reconnectIfNeeded)
     }
 
-    // Read on every scan result and disconnect, so cache it; Dart writes the list to the
-    // same SharedPreferences file in this process, which invalidates the cache.
-    @Volatile
-    private var registeredDeviceIds: Set<String>? = null
-    private val flutterPrefsListener =
-        SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
-            if (key == FLUTTER_REGISTERED_DEVICES_KEY) {
-                registeredDeviceIds = null
-            }
+    // When of the last automatic connect per address (elapsedRealtime). A peer that
+    // turns links away would otherwise be retried on every scan result.
+    private val lastAutoConnect = ConcurrentHashMap<String, Long>()
+    private val retryScheduled = ConcurrentHashMap.newKeySet<String>()
+
+    @SuppressLint("MissingPermission")
+    private fun reconnectIfNeeded(device: BluetoothDevice) {
+        val address = device.address ?: return
+        if (
+            !isCentralEnabled ||
+            device.bondState != BluetoothDevice.BOND_BONDED ||
+            !engine.shouldReconnect(address) ||
+            activeConnections.containsKey(address) ||
+            pendingConnections.containsKey(address)
+        ) {
+            return
         }
-
-    private fun loadRegisteredDeviceIds(): Set<String> =
-        registeredDeviceIds ?: readRegisteredDeviceIds().also { registeredDeviceIds = it }
-
-    private fun readRegisteredDeviceIds(): Set<String> {
-        val flutterPrefs = getSharedPreferences(FLUTTER_PREFS_NAME, Context.MODE_PRIVATE)
-        val raw = flutterPrefs.getString(FLUTTER_REGISTERED_DEVICES_KEY, null) ?: return emptySet()
-        return runCatching {
-            val array = JSONArray(raw)
-            buildSet {
-                for (index in 0 until array.length()) {
-                    val item = array.optJSONObject(index) ?: continue
-                    val identifier = item.optString("identifier")
-                    if (identifier.isNotBlank()) {
-                        add(identifier)
-                    }
-                }
+        val wait = (lastAutoConnect[address] ?: Long.MIN_VALUE / 2) + AUTO_CONNECT_INTERVAL_MS -
+            SystemClock.elapsedRealtime()
+        if (wait > 0) {
+            if (retryScheduled.add(address)) {
+                handler.postDelayed({
+                    retryScheduled.remove(address)
+                    reconnectIfNeeded(device)
+                }, wait)
             }
-        }.getOrElse { emptySet() }
+            return
+        }
+        lastAutoConnect[address] = SystemClock.elapsedRealtime()
+        connectGattIfNeeded(device)
     }
 
     @SuppressLint("MissingPermission")
@@ -362,7 +366,7 @@ class BluetoothBackgroundService : Service() {
             return true
         }
         val server = bluetoothManager.openGattServer(this, gattServerCallback) ?: return false
-        // Writing a message or subscribing needs an encrypted link, i.e. a bonded peer.
+        // Writing a frame or subscribing needs an encrypted link, i.e. a bonded peer.
         // Unbonded centrals get "insufficient encryption", which makes iOS (and other
         // stacks) start pairing, instead of chatting under a rotating random address.
         val characteristic = BluetoothGattCharacteristic(
@@ -395,12 +399,9 @@ class BluetoothBackgroundService : Service() {
         val centrals = subscribedCentrals.values.toList()
         subscribedCentrals.clear()
         centralMtus.clear()
-        preparedWrites.clear()
         failQueues(serverQueues, "GATT server closed")
-        centrals.forEach { central ->
-            runCatching { server.cancelConnection(central) }
-            emitDisconnectedIfUnlinked(central.address)
-        }
+        centrals.forEach { central -> runCatching { server.cancelConnection(central) } }
+        serverLinkIds.keys.toList().forEach(::dropServerLink)
         runCatching { server.close() }
     }
 
@@ -450,8 +451,11 @@ class BluetoothBackgroundService : Service() {
             return
         }
         val device = runCatching { adapter?.getRemoteDevice(deviceId) }.getOrNull() ?: return
+        if (pair) {
+            userInitiated.add(deviceId)
+        }
         when {
-            device.bondState == BluetoothDevice.BOND_BONDED -> connectGattIfNeeded(device)
+            device.bondState == BluetoothDevice.BOND_BONDED -> connectGattIfNeeded(device, userRequested = pair)
             // Only a user-initiated connect may show the system pairing dialog;
             // replaying saved devices on launch must not.
             pair -> bondDevice(device)
@@ -472,115 +476,280 @@ class BluetoothBackgroundService : Service() {
         }
         if (!device.createBond()) {
             pendingBondAddresses.remove(address)
+            userInitiated.remove(address)
             emitError("Pairing with $address could not be started")
-            emitDisconnectedIfUnlinked(address)
+            emitDisconnected(address)
             return
         }
         BleEventBus.emit(mapOf("type" to "bonding", "deviceId" to address))
     }
 
     @SuppressLint("MissingPermission")
-    private fun connectGattIfNeeded(device: BluetoothDevice) {
+    private fun connectGattIfNeeded(device: BluetoothDevice, userRequested: Boolean = false) {
         val address = device.address ?: return
-        if (activeConnections.containsKey(address) || pendingConnections.containsKey(address)) {
+        if (activeConnections.containsKey(address)) {
             return
         }
-        // Background (autoConnect) connections only work with identity addresses.
-        // Unbonded peers advertise with a resolvable private address, which the stack
-        // rejects for background connect (status 133/135), so connect directly instead.
-        val autoConnect = device.bondState == BluetoothDevice.BOND_BONDED
+        idleClients.remove(address)?.let { gatt ->
+            // Still connected and subscribed; a new handshake is enough.
+            activeConnections[address] = gatt
+            clientLinkUp(address)
+            return
+        }
+        pendingConnections[address]?.let { pending ->
+            if (!userRequested) {
+                return
+            }
+            // A background connect may take minutes; the user is waiting, so connect
+            // directly instead.
+            pendingConnections.remove(address)
+            runCatching { pending.close() }
+        }
+        // 9절: a peer already linked to our GATT server needs no second link.
+        if (!userRequested && engine.hasLiveLink(address)) {
+            return
+        }
+        // Background (autoConnect) connections only work with identity addresses, i.e.
+        // bonded peers; a user-requested connect goes direct, so it fails fast.
+        val autoConnect = !userRequested && device.bondState == BluetoothDevice.BOND_BONDED
         val gatt = device.connectGatt(this, autoConnect, gattCallback, BluetoothDevice.TRANSPORT_LE)
             ?: return
         pendingConnections[address] = gatt
     }
 
-    @SuppressLint("MissingPermission")
-    private fun disconnectDevice(deviceId: String?) {
+    /** Deletes the peer (UNPAIR first if connected, 6.6), then drops every link to it. */
+    private fun removeDevice(deviceId: String?) {
         if (deviceId.isNullOrBlank()) {
             return
         }
+        val peers = BleRuntime.store.peers().filter { it.deviceId == deviceId }
+        if (peers.isEmpty()) {
+            disconnectDevice(deviceId)
+            return
+        }
+        var remaining = peers.size
+        peers.forEach { peer ->
+            engine.removePeer(peer.peerId) {
+                remaining--
+                if (remaining == 0) {
+                    disconnectDevice(deviceId)
+                }
+            }
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun disconnectDevice(deviceId: String) {
         pendingBondAddresses.remove(deviceId)
-        writableCharacteristics.remove(deviceId)
-        listOfNotNull(pendingConnections.remove(deviceId), activeConnections.remove(deviceId))
+        userInitiated.remove(deviceId)
+        listOfNotNull(
+            pendingConnections.remove(deviceId),
+            activeConnections.remove(deviceId),
+            idleClients.remove(deviceId)
+        )
             .forEach { gatt ->
                 runCatching {
                     gatt.disconnect()
                     gatt.close()
                 }
             }
+        // close() unregisters the client callback, so onConnectionStateChange won't report this.
+        dropClientLink(deviceId)
         subscribedCentrals.remove(deviceId)?.let { central ->
             centralMtus.remove(deviceId)
-            preparedWrites.remove(deviceId)
             runCatching { gattServer?.cancelConnection(central) }
         }
-        clientQueues.remove(deviceId)?.failAll("Disconnected")
         serverQueues.remove(deviceId)?.failAll("Disconnected")
-        // close() unregisters the client callback, so onConnectionStateChange won't report this.
-        emitDisconnectedIfUnlinked(deviceId)
+        dropServerLink(deviceId)
+        emitDisconnected(deviceId)
         emitStatus()
     }
 
     @SuppressLint("MissingPermission")
     private fun disconnectAll() {
-        val entries = activeConnections.values.toList()
+        val entries = activeConnections.values.toList() + idleClients.values
         val pending = pendingConnections.values.toList()
+        val addresses = activeConnections.keys + pendingConnections.keys + clientLinkIds.keys + idleClients.keys
         activeConnections.clear()
         pendingConnections.clear()
-        writableCharacteristics.clear()
-        failQueues(clientQueues, "Disconnected")
+        idleClients.clear()
+        userInitiated.clear()
         pending.forEach { runCatching { it.close() } }
         entries.forEach {
             runCatching {
                 it.disconnect()
                 it.close()
             }
-            // close() unregisters the callback, so onConnectionStateChange won't report this.
-            emitDisconnectedIfUnlinked(it.device.address)
+        }
+        // close() unregisters the callback, so onConnectionStateChange won't report this.
+        addresses.forEach(::dropClientLink)
+    }
+
+    /** Forgets our client link to [address]: its writes fail, and the engine drops it. */
+    private fun dropClientLink(address: String) {
+        writableCharacteristics.remove(address)
+        clientMtus.remove(address)
+        clientQueues.remove(address)?.failAll("Disconnected")
+        clientLinkIds.remove(address)?.let { linkId ->
+            linkTargets.remove(linkId)
+            engine.linkDown(linkId)
+        }
+    }
+
+    private fun dropServerLink(address: String) {
+        serverLinkIds.remove(address)?.let { linkId ->
+            linkTargets.remove(linkId)
+            engine.linkDown(linkId)
+        }
+    }
+
+    private fun clientLinkUp(address: String) {
+        if (!activeConnections.containsKey(address)) {
+            return
+        }
+        clientLinkIds.remove(address)?.let { old ->
+            linkTargets.remove(old)
+            engine.linkDown(old)
+        }
+        val linkId = nextLinkId++
+        clientLinkIds[address] = linkId
+        linkTargets[linkId] = LinkTarget(address, Role.CENTRAL)
+        engine.linkUp(linkId, Role.CENTRAL, address, Frames.frameSize(attMtu(address)), userInitiated.contains(address))
+    }
+
+    private fun serverLinkUp(address: String) {
+        if (serverLinkIds.containsKey(address)) {
+            return
+        }
+        val linkId = nextLinkId++
+        serverLinkIds[address] = linkId
+        linkTargets[linkId] = LinkTarget(address, Role.PERIPHERAL)
+        engine.linkUp(linkId, Role.PERIPHERAL, address, Frames.frameSize(attMtu(address)), false)
+    }
+
+    // The ATT MTU belongs to the Bluetooth connection, which both roles share. A
+    // central that subscribes over an existing connection doesn't renegotiate it, so
+    // the server never hears onMtuChanged; use what the client side learned.
+    private fun attMtu(address: String) = clientMtus[address] ?: centralMtus[address] ?: DEFAULT_ATT_MTU
+
+    // BleTransport: the engine's frames go out as a characteristic write (we're the
+    // central) or a notification (we're the peripheral), one GATT operation at a time.
+    override fun writeFrame(linkId: Int, frame: ByteArray) {
+        val target = linkTargets[linkId]
+        if (target == null) {
+            handler.post { engine.frameWritten(linkId, false) }
+            return
+        }
+        val done: (Boolean, String?) -> Unit = { success, error ->
+            if (!success) {
+                Log.w(TAG, "Frame to ${target.address} (${target.role}) failed: $error")
+            }
+            handler.post { engine.frameWritten(linkId, success) }
+        }
+        when (target.role) {
+            Role.CENTRAL -> {
+                val gatt = activeConnections[target.address]
+                val characteristic = writableCharacteristics[target.address]
+                if (gatt == null || characteristic == null) {
+                    done(false, null)
+                    return
+                }
+                clientQueue(target.address).enqueue(
+                    GattOperationQueue.Operation(start = { writeFrame(gatt, characteristic, frame) }, onComplete = done)
+                )
+            }
+            Role.PERIPHERAL -> {
+                val central = subscribedCentrals[target.address]
+                val server = gattServer
+                val characteristic = serverCharacteristic
+                if (central == null || server == null || characteristic == null) {
+                    done(false, null)
+                    return
+                }
+                serverQueues.getOrPut(target.address) { GattOperationQueue() }.enqueue(
+                    GattOperationQueue.Operation(start = { notifyFrame(server, central, characteristic, frame) }, onComplete = done)
+                )
+            }
         }
     }
 
     @SuppressLint("MissingPermission")
-    private fun sendMessage(deviceId: String, message: String, messageId: String?) {
-        val payload = message.toByteArray(Charsets.UTF_8)
-        val gatt = activeConnections[deviceId]
-        val characteristic = writableCharacteristics[deviceId]
-        if (gatt == null || characteristic == null) {
-            // Not our GATT client link; the peer may be a central subscribed to our server.
-            notifyCentral(deviceId, payload, messageId)
-            return
+    override fun closeLink(linkId: Int) {
+        val target = linkTargets.remove(linkId) ?: return
+        when (target.role) {
+            Role.CENTRAL -> {
+                clientLinkIds.remove(target.address, linkId)
+                clientQueues.remove(target.address)?.failAll("Link closed")
+                val gatt = activeConnections.remove(target.address)
+                if (gatt != null && engine.hasLiveLink(target.address)) {
+                    idleClients[target.address] = gatt
+                } else {
+                    gatt?.let {
+                        runCatching {
+                            it.disconnect()
+                            it.close()
+                        }
+                    }
+                    writableCharacteristics.remove(target.address)
+                    clientMtus.remove(target.address)
+                }
+            }
+            // The protocol leaves closing to the central; this only happens when a
+            // pairing key couldn't be stored.
+            Role.PERIPHERAL -> {
+                serverLinkIds.remove(target.address, linkId)
+                subscribedCentrals[target.address]?.let { runCatching { gattServer?.cancelConnection(it) } }
+            }
         }
-        // Longer values than an attribute can hold are rejected by the peer.
-        if (payload.size > MAX_ATTRIBUTE_LENGTH) {
-            reportSend(
-                deviceId,
-                messageId,
-                false,
-                "Message too long (${payload.size}/$MAX_ATTRIBUTE_LENGTH bytes)"
-            )
-            return
+        emitStatus()
+    }
+
+    override fun onEngineEvent(event: EngineEvent) {
+        if (event is EngineEvent.Connected) {
+            userInitiated.remove(event.deviceId)
         }
-        clientQueue(deviceId).enqueue(
-            GattOperationQueue.Operation(
-                start = { writeMessage(gatt, characteristic, payload) },
-                onComplete = { success, error -> reportSend(deviceId, messageId, success, error) }
-            )
-        )
+        if (event is EngineEvent.Disconnected) {
+            // The link an idle client was kept for ended; reuse the client or let go.
+            handler.post { releaseIdleClient(event.deviceId) }
+        }
+        if (event is EngineEvent.Connected || event is EngineEvent.Disconnected) {
+            emitStatus()
+        }
     }
 
     @SuppressLint("MissingPermission")
-    private fun writeMessage(
+    private fun releaseIdleClient(address: String) {
+        if (engine.hasLiveLink(address)) {
+            return
+        }
+        val gatt = idleClients[address] ?: return
+        if (isCentralEnabled && engine.shouldReconnect(address)) {
+            connectGattIfNeeded(gatt.device)
+            return
+        }
+        idleClients.remove(address)
+        writableCharacteristics.remove(address)
+        clientMtus.remove(address)
+        runCatching {
+            gatt.disconnect()
+            gatt.close()
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun writeFrame(
         gatt: BluetoothGatt,
         characteristic: BluetoothGattCharacteristic,
-        payload: ByteArray
+        frame: ByteArray
     ): Boolean {
         val writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            gatt.writeCharacteristic(characteristic, payload, writeType) ==
+            gatt.writeCharacteristic(characteristic, frame, writeType) ==
                 BluetoothStatusCodes.SUCCESS
         } else {
             @Suppress("DEPRECATION")
             run {
-                characteristic.value = payload
+                characteristic.value = frame
                 characteristic.writeType = writeType
                 gatt.writeCharacteristic(characteristic)
             }
@@ -588,37 +757,19 @@ class BluetoothBackgroundService : Service() {
     }
 
     @SuppressLint("MissingPermission")
-    private fun notifyCentral(deviceId: String, payload: ByteArray, messageId: String?) {
-        val central = subscribedCentrals[deviceId]
-        val server = gattServer
-        val characteristic = serverCharacteristic
-        if (central == null || server == null || characteristic == null) {
-            reportSend(deviceId, messageId, false, "No writable BLE connection for $deviceId")
-            return
+    private fun notifyFrame(
+        server: BluetoothGattServer,
+        central: BluetoothDevice,
+        characteristic: BluetoothGattCharacteristic,
+        frame: ByteArray
+    ): Boolean = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        server.notifyCharacteristicChanged(central, characteristic, false, frame) == BluetoothStatusCodes.SUCCESS
+    } else {
+        @Suppress("DEPRECATION")
+        run {
+            characteristic.value = frame
+            server.notifyCharacteristicChanged(central, characteristic, false)
         }
-        // A notification can't be split, so it must fit in a single ATT packet.
-        val maxPayload = (centralMtus[deviceId] ?: DEFAULT_ATT_MTU) - ATT_HEADER_SIZE
-        if (payload.size > maxPayload) {
-            reportSend(deviceId, messageId, false, "Message too long (${payload.size}/$maxPayload bytes)")
-            return
-        }
-        serverQueues.getOrPut(deviceId) { GattOperationQueue() }.enqueue(
-            GattOperationQueue.Operation(
-                start = {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                        server.notifyCharacteristicChanged(central, characteristic, false, payload) ==
-                            BluetoothStatusCodes.SUCCESS
-                    } else {
-                        @Suppress("DEPRECATION")
-                        run {
-                            characteristic.value = payload
-                            server.notifyCharacteristicChanged(central, characteristic, false)
-                        }
-                    }
-                },
-                onComplete = { success, error -> reportSend(deviceId, messageId, success, error) }
-            )
-        )
     }
 
     private fun clientQueue(address: String) =
@@ -630,56 +781,11 @@ class BluetoothBackgroundService : Service() {
         drained.forEach { it.failAll(error) }
     }
 
-    /**
-     * Reports the outcome of a sendMessage call. Dart tracks each outgoing message by
-     * [messageId]; without one, only failures are reported, as a generic error.
-     */
-    private fun reportSend(deviceId: String, messageId: String?, success: Boolean, error: String?) {
-        if (messageId == null) {
-            if (!success) {
-                emitError("Sending to $deviceId failed: $error")
-            }
-            return
+    /** Ends Dart's connecting state for an attempt that never reached a session. */
+    private fun emitDisconnected(address: String) {
+        if (!engine.isConnected(address)) {
+            BleEventBus.emit(mapOf("type" to "disconnected", "deviceId" to address))
         }
-        BleEventBus.emit(
-            if (success) {
-                mapOf("type" to "messageSent", "deviceId" to deviceId, "messageId" to messageId)
-            } else {
-                mapOf(
-                    "type" to "messageFailed",
-                    "deviceId" to deviceId,
-                    "messageId" to messageId,
-                    "error" to (error ?: "Unknown error")
-                )
-            }
-        )
-    }
-
-    private fun emitMessage(deviceId: String, payload: ByteArray) {
-        val message = payload.toString(Charsets.UTF_8)
-        BleEventBus.emit(
-            mapOf(
-                "type" to "message",
-                "deviceId" to deviceId,
-                "message" to message,
-                "receivedAt" to System.currentTimeMillis()
-            )
-        )
-        notifyIncomingMessage(deviceId, message)
-    }
-
-    // Two bonded phones that both run central mode end up linked twice (each is the
-    // other's central), so a peer only counts as disconnected once neither link is left.
-    private fun emitDisconnectedIfUnlinked(address: String) {
-        if (activeConnections.containsKey(address) || subscribedCentrals.containsKey(address)) {
-            return
-        }
-        BleEventBus.emit(
-            mapOf(
-                "type" to "disconnected",
-                "deviceId" to address
-            )
-        )
     }
 
     private fun emitError(message: String) {
@@ -692,7 +798,8 @@ class BluetoothBackgroundService : Service() {
     }
 
     private fun emitStatus() {
-        val connectionCount = (activeConnections.keys + subscribedCentrals.keys).size
+        // Peers with a session, over both roles.
+        val connectionCount = engine.connectedSessions().map { it.deviceId }.toSet().size
         val status = when {
             adapter?.state != BluetoothAdapter.STATE_ON -> STATUS_BLUETOOTH_OFF
             connectionCount > 0 -> {
@@ -754,42 +861,8 @@ class BluetoothBackgroundService : Service() {
         )
         val manager = getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(channel)
-        manager.createNotificationChannel(
-            NotificationChannel(
-                MESSAGE_CHANNEL_ID,
-                "Bluetooth 메시지",
-                NotificationManager.IMPORTANCE_DEFAULT
-            )
-        )
-    }
-
-    /**
-     * Posts a notification for a message received while the app isn't in the
-     * foreground; otherwise it would only show up once the user happens to open the app.
-     * One notification per device (tagged with its address), opening the app on tap.
-     */
-    @SuppressLint("MissingPermission")
-    private fun notifyIncomingMessage(deviceId: String, message: String) {
-        val manager = NotificationManagerCompat.from(this)
-        if (BleEventBus.appInForeground || !manager.areNotificationsEnabled()) {
-            return
-        }
-        // Bonded peers have a name; fall back to the address.
-        val title = runCatching { adapter?.getRemoteDevice(deviceId)?.name }.getOrNull() ?: deviceId
-        val openApp = PendingIntent.getActivity(
-            this,
-            0,
-            Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        )
-        val notification = NotificationCompat.Builder(this, MESSAGE_CHANNEL_ID)
-            .setContentTitle(title)
-            .setContentText(message)
-            .setSmallIcon(android.R.drawable.stat_notify_chat)
-            .setContentIntent(openApp)
-            .setAutoCancel(true)
-            .build()
-        manager.notify(deviceId, MESSAGE_NOTIFICATION_ID, notification)
+        // The chat's message notifications are gone.
+        manager.deleteNotificationChannel(OLD_MESSAGE_CHANNEL_ID)
     }
 
     private fun hasBlePermissions(): Boolean {
@@ -879,63 +952,30 @@ class BluetoothBackgroundService : Service() {
                     )
                 )
             }
-            val knownDeviceIds = loadRegisteredDeviceIds()
-            if (
-                isCentralEnabled &&
-                device.bondState == BluetoothDevice.BOND_BONDED &&
-                knownDeviceIds.contains(address)
-            ) {
-                connectGattIfNeeded(device)
-            }
+            reconnectIfNeeded(device)
         }
     }
 
+    // GATT callbacks arrive on binder threads; their work runs on the main looper with
+    // the engine. Values are copied first: the deprecated callbacks reuse buffers.
     private val gattCallback = object : BluetoothGattCallback() {
-        @SuppressLint("MissingPermission")
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
-            val address = gatt.device.address ?: return
-            when (newState) {
-                BluetoothProfile.STATE_CONNECTED -> {
-                    pendingConnections.remove(address)
-                    activeConnections[address] = gatt
-                    // The default MTU leaves 20 bytes per packet (6 Korean characters), and
-                    // the peer's notifications can't be split, so negotiate a larger MTU
-                    // before discovering services.
-                    if (!gatt.requestMtu(MAX_ATT_MTU)) {
-                        gatt.discoverServices()
-                    }
-                    BleEventBus.emit(
-                        mapOf(
-                            "type" to "connected",
-                            "deviceId" to address
-                        )
-                    )
-                }
-                BluetoothProfile.STATE_DISCONNECTED -> {
-                    pendingConnections.remove(address)
-                    val wasConnected = activeConnections.remove(address) != null
-                    writableCharacteristics.remove(address)
-                    clientQueues.remove(address)?.failAll("Disconnected")
-                    runCatching { gatt.close() }
-                    if (!wasConnected && status != BluetoothGatt.GATT_SUCCESS) {
-                        emitError("Connection to $address failed (status $status)")
-                    }
-                    emitDisconnectedIfUnlinked(address)
-                    if (
-                        isCentralEnabled &&
-                        gatt.device.bondState == BluetoothDevice.BOND_BONDED &&
-                        loadRegisteredDeviceIds().contains(address)
-                    ) {
-                        connectGattIfNeeded(gatt.device)
-                    }
-                }
-            }
-            emitStatus()
+            handler.post { onClientConnectionStateChange(gatt, status, newState) }
         }
 
-        @SuppressLint("MissingPermission")
         override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
-            gatt.discoverServices()
+            handler.post {
+                val address = gatt.device.address ?: return@post
+                if (activeConnections[address] !== gatt) {
+                    return@post
+                }
+                clientMtus[address] = mtu
+                clientLinkIds[address]?.let { engine.setMaxFrameSize(it, Frames.frameSize(mtu)) }
+                serverLinkIds[address]?.let { engine.setMaxFrameSize(it, Frames.frameSize(mtu)) }
+                if (!writableCharacteristics.containsKey(address)) {
+                    gatt.discoverServices()
+                }
+            }
         }
 
         override fun onCharacteristicWrite(
@@ -944,10 +984,12 @@ class BluetoothBackgroundService : Service() {
             status: Int
         ) {
             val address = gatt.device.address ?: return
-            clientQueues[address]?.complete(
-                status == BluetoothGatt.GATT_SUCCESS,
-                "Write failed (status $status)"
-            )
+            handler.post {
+                clientQueues[address]?.complete(
+                    status == BluetoothGatt.GATT_SUCCESS,
+                    "Write failed (status $status)"
+                )
+            }
         }
 
         override fun onDescriptorWrite(
@@ -956,38 +998,30 @@ class BluetoothBackgroundService : Service() {
             status: Int
         ) {
             val address = gatt.device.address ?: return
-            clientQueues[address]?.complete(
-                status == BluetoothGatt.GATT_SUCCESS,
-                "Descriptor write failed (status $status)"
-            )
+            handler.post {
+                clientQueues[address]?.complete(
+                    status == BluetoothGatt.GATT_SUCCESS,
+                    "Descriptor write failed (status $status)"
+                )
+            }
         }
 
-        @SuppressLint("MissingPermission")
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
-            if (status != BluetoothGatt.GATT_SUCCESS) {
-                return
-            }
-            val address = gatt.device.address ?: return
-            val characteristic = gatt.getService(SERVICE_UUID)
-                ?.getCharacteristic(MESSAGE_CHARACTERISTIC_UUID)
-            if (characteristic != null) {
-                writableCharacteristics[address] = characteristic
-                gatt.setCharacteristicNotification(characteristic, true)
-                val cccd = characteristic.getDescriptor(CLIENT_CONFIG_DESCRIPTOR_UUID)
-                if (cccd != null) {
-                    // Queued like the message writes, so a message sent right after
-                    // connecting doesn't collide with the subscription.
-                    clientQueue(address).enqueue(
-                        GattOperationQueue.Operation(
-                            start = { enableNotifications(gatt, cccd) },
-                            onComplete = { success, error ->
-                                if (!success) {
-                                    emitError("Subscribing to $address failed: $error")
-                                }
-                            }
-                        )
-                    )
+            handler.post { onClientServicesDiscovered(gatt, status) }
+        }
+
+        // The peer's GATT database changed, typically because its app restarted and
+        // registered a new server while Bluetooth stayed connected (other apps hold
+        // the connection). Our session went with the old server: discover and
+        // subscribe again, which starts a new handshake on this link.
+        override fun onServiceChanged(gatt: BluetoothGatt) {
+            handler.post {
+                val address = gatt.device.address ?: return@post
+                if (activeConnections[address] !== gatt) {
+                    return@post
                 }
+                writableCharacteristics.remove(address)
+                gatt.discoverServices()
             }
         }
 
@@ -996,11 +1030,9 @@ class BluetoothBackgroundService : Service() {
             gatt: BluetoothGatt,
             characteristic: BluetoothGattCharacteristic
         ) {
-            if (characteristic.uuid != MESSAGE_CHARACTERISTIC_UUID) {
-                return
+            if (characteristic.uuid == MESSAGE_CHARACTERISTIC_UUID) {
+                onClientFrame(gatt, characteristic.value?.copyOf() ?: return)
             }
-            val address = gatt.device.address ?: return
-            emitMessage(address, characteristic.value ?: return)
         }
 
         override fun onCharacteristicChanged(
@@ -1008,12 +1040,101 @@ class BluetoothBackgroundService : Service() {
             characteristic: BluetoothGattCharacteristic,
             value: ByteArray
         ) {
-            if (characteristic.uuid != MESSAGE_CHARACTERISTIC_UUID) {
-                return
+            if (characteristic.uuid == MESSAGE_CHARACTERISTIC_UUID) {
+                onClientFrame(gatt, value.copyOf())
             }
-            val address = gatt.device.address ?: return
-            emitMessage(address, value)
         }
+    }
+
+    private fun onClientFrame(gatt: BluetoothGatt, frame: ByteArray) {
+        val address = gatt.device.address ?: return
+        handler.post { clientLinkIds[address]?.let { engine.frameReceived(it, frame) } }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun onClientConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+        val address = gatt.device.address ?: return
+        if (idleClients[address] === gatt) {
+            if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                idleClients.remove(address)
+                writableCharacteristics.remove(address)
+                clientMtus.remove(address)
+                runCatching { gatt.close() }
+                reconnectIfNeeded(gatt.device)
+            }
+            return
+        }
+        // Callbacks queued before a close() can still arrive; they're about a gatt
+        // object we no longer use.
+        val current = pendingConnections[address] === gatt || activeConnections[address] === gatt
+        if (!current) {
+            return
+        }
+        when (newState) {
+            BluetoothProfile.STATE_CONNECTED -> {
+                pendingConnections.remove(address)
+                activeConnections[address] = gatt
+                // The default MTU leaves 20 bytes per frame; negotiate a larger one before
+                // discovering services.
+                if (!gatt.requestMtu(MAX_ATT_MTU)) {
+                    gatt.discoverServices()
+                }
+            }
+            BluetoothProfile.STATE_DISCONNECTED -> {
+                pendingConnections.remove(address)
+                val wasConnected = activeConnections.remove(address) != null
+                dropClientLink(address)
+                runCatching { gatt.close() }
+                userInitiated.remove(address)
+                if (!wasConnected && status != BluetoothGatt.GATT_SUCCESS) {
+                    emitError("Connection to $address failed (status $status)")
+                }
+                emitDisconnected(address)
+                reconnectIfNeeded(gatt.device)
+            }
+        }
+        emitStatus()
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun onClientServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+        val address = gatt.device.address ?: return
+        if (status != BluetoothGatt.GATT_SUCCESS || activeConnections[address] !== gatt) {
+            return
+        }
+        val characteristic = gatt.getService(SERVICE_UUID)?.getCharacteristic(MESSAGE_CHARACTERISTIC_UUID)
+        if (characteristic == null) {
+            // Same service, older protocol (the characteristic UUID changed with it):
+            // nothing to talk to.
+            emitError("$address runs an incompatible version of the app")
+            activeConnections.remove(address)
+            userInitiated.remove(address)
+            runCatching {
+                gatt.disconnect()
+                gatt.close()
+            }
+            emitDisconnected(address)
+            emitStatus()
+            return
+        }
+        writableCharacteristics[address] = characteristic
+        gatt.setCharacteristicNotification(characteristic, true)
+        val cccd = characteristic.getDescriptor(CLIENT_CONFIG_DESCRIPTOR_UUID) ?: return
+        // Queued like the frame writes. The link is usable once the peer can notify us.
+        clientQueue(address).enqueue(
+            GattOperationQueue.Operation(
+                start = { enableNotifications(gatt, cccd) },
+                onComplete = { success, error ->
+                    handler.post {
+                        if (success) {
+                            clientLinkUp(address)
+                        } else {
+                            emitError("Subscribing to $address failed: $error")
+                        }
+                    }
+                }
+            )
+        )
     }
 
     @SuppressLint("MissingPermission")
@@ -1085,7 +1206,7 @@ class BluetoothBackgroundService : Service() {
                 // bond, so a pending background connect to it can never succeed.
                 pendingConnections.remove(address)?.let { runCatching { it.close() } }
                 BleEventBus.emit(mapOf("type" to "bondLost", "deviceId" to address))
-                emitDisconnectedIfUnlinked(address)
+                emitDisconnected(address)
                 emitStatus()
                 return
             }
@@ -1095,48 +1216,58 @@ class BluetoothBackgroundService : Service() {
             when (state) {
                 BluetoothDevice.BOND_BONDED -> {
                     pendingBondAddresses.remove(address)
-                    connectGattIfNeeded(device)
+                    // Only the 연결 button bonds, so this connect is the user's.
+                    connectGattIfNeeded(device, userRequested = true)
                 }
                 BluetoothDevice.BOND_NONE -> {
                     pendingBondAddresses.remove(address)
+                    userInitiated.remove(address)
                     emitError("Pairing with $address failed")
                     // Ends the 연결 중/페어링 중 state in Dart.
-                    emitDisconnectedIfUnlinked(address)
+                    emitDisconnected(address)
                 }
             }
         }
     }
 
-    // Peripheral role: a remote central writes messages to our characteristic and
-    // subscribes to it to receive our replies as notifications.
+    // Peripheral role: a remote central subscribes to our characteristic, writes its
+    // frames to it, and gets ours as notifications. Work runs on the main looper.
     private val gattServerCallback = object : BluetoothGattServerCallback() {
         override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
-            // This fires for every LE link to this phone (watches, other apps), so only
-            // centrals that subscribed to our characteristic count as peers.
+            // This fires for every LE link to this phone (watches, other apps); only
+            // centrals that subscribed have a link.
             if (newState != BluetoothProfile.STATE_DISCONNECTED) {
                 return
             }
             val address = device.address ?: return
-            centralMtus.remove(address)
-            preparedWrites.remove(address)
-            serverQueues.remove(address)?.failAll("Disconnected")
-            if (subscribedCentrals.remove(address) != null) {
-                emitDisconnectedIfUnlinked(address)
+            handler.post {
+                centralMtus.remove(address)
+                serverQueues.remove(address)?.failAll("Disconnected")
+                subscribedCentrals.remove(address)
+                dropServerLink(address)
+                // The peer is gone in both roles; reconnect from our side if it's ours to.
+                reconnectIfNeeded(device)
                 emitStatus()
             }
         }
 
         override fun onNotificationSent(device: BluetoothDevice, status: Int) {
             val address = device.address ?: return
-            serverQueues[address]?.complete(
-                status == BluetoothGatt.GATT_SUCCESS,
-                "Notification failed (status $status)"
-            )
+            handler.post {
+                serverQueues[address]?.complete(
+                    status == BluetoothGatt.GATT_SUCCESS,
+                    "Notification failed (status $status)"
+                )
+            }
         }
 
         override fun onMtuChanged(device: BluetoothDevice, mtu: Int) {
             val address = device.address ?: return
-            centralMtus[address] = mtu
+            handler.post {
+                centralMtus[address] = mtu
+                serverLinkIds[address]?.let { engine.setMaxFrameSize(it, Frames.frameSize(mtu)) }
+                clientLinkIds[address]?.let { engine.setMaxFrameSize(it, Frames.frameSize(mtu)) }
+            }
         }
 
         @SuppressLint("MissingPermission")
@@ -1150,7 +1281,8 @@ class BluetoothBackgroundService : Service() {
             value: ByteArray?
         ) {
             val address = device.address ?: return
-            if (characteristic.uuid != MESSAGE_CHARACTERISTIC_UUID) {
+            // Every frame fits in one ATT write (4절), so long writes aren't supported.
+            if (characteristic.uuid != MESSAGE_CHARACTERISTIC_UUID || preparedWrite) {
                 if (responseNeeded) {
                     gattServer?.sendResponse(
                         device, requestId, BluetoothGatt.GATT_REQUEST_NOT_SUPPORTED, offset, null
@@ -1158,26 +1290,22 @@ class BluetoothBackgroundService : Service() {
                 }
                 return
             }
-            val bytes = value ?: ByteArray(0)
-            if (preparedWrite) {
-                // Long write: chunks arrive in order and are delivered on onExecuteWrite.
-                preparedWrites.getOrPut(address) { ByteArrayOutputStream() }.write(bytes)
-            } else {
-                emitMessage(address, bytes)
-            }
             if (responseNeeded) {
-                gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
+                gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, null)
+            }
+            val frame = value?.copyOf() ?: return
+            handler.post {
+                // A central that resubscribed on a surviving connection may write first.
+                if (!serverLinkIds.containsKey(address) && subscribedCentrals.containsKey(address)) {
+                    serverLinkUp(address)
+                }
+                serverLinkIds[address]?.let { engine.frameReceived(it, frame) }
             }
         }
 
         @SuppressLint("MissingPermission")
         override fun onExecuteWrite(device: BluetoothDevice, requestId: Int, execute: Boolean) {
-            val address = device.address ?: return
-            val buffer = preparedWrites.remove(address)
-            if (execute && buffer != null) {
-                emitMessage(address, buffer.toByteArray())
-            }
-            gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
+            gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_REQUEST_NOT_SUPPORTED, 0, null)
         }
 
         @SuppressLint("MissingPermission")
@@ -1206,32 +1334,22 @@ class BluetoothBackgroundService : Service() {
             value: ByteArray?
         ) {
             val address = device.address ?: return
-            if (descriptor.uuid == CLIENT_CONFIG_DESCRIPTOR_UUID) {
-                val subscribed = value?.contentEquals(
-                    BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                ) == true
-                val changed = if (subscribed) {
-                    subscribedCentrals.put(address, device) == null
-                } else {
-                    subscribedCentrals.remove(address) != null
-                }
-                if (changed) {
-                    if (subscribed) {
-                        BleEventBus.emit(
-                            mapOf(
-                                "type" to "connected",
-                                "deviceId" to address
-                            )
-                        )
-                    } else {
-                        serverQueues.remove(address)?.failAll("Unsubscribed")
-                        emitDisconnectedIfUnlinked(address)
-                    }
-                    emitStatus()
-                }
-            }
             if (responseNeeded) {
                 gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
+            }
+            if (descriptor.uuid != CLIENT_CONFIG_DESCRIPTOR_UUID) {
+                return
+            }
+            val subscribed = value?.contentEquals(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE) == true
+            handler.post {
+                if (subscribed) {
+                    subscribedCentrals[address] = device
+                    serverLinkUp(address)
+                } else if (subscribedCentrals.remove(address) != null) {
+                    serverQueues.remove(address)?.failAll("Unsubscribed")
+                    dropServerLink(address)
+                }
+                emitStatus()
             }
         }
     }
@@ -1244,13 +1362,12 @@ class BluetoothBackgroundService : Service() {
         const val ACTION_STOP_CENTRAL = "ble.action.STOP_CENTRAL"
         const val ACTION_SCAN_NOW = "ble.action.SCAN_NOW"
         const val ACTION_CONNECT_DEVICE = "ble.action.CONNECT_DEVICE"
-        const val ACTION_SEND_MESSAGE = "ble.action.SEND_MESSAGE"
-        const val ACTION_DISCONNECT_DEVICE = "ble.action.DISCONNECT_DEVICE"
+        const val ACTION_REMOVE_DEVICE = "ble.action.REMOVE_DEVICE"
+        const val ACTION_RESPOND_PAIRING = "ble.action.RESPOND_PAIRING"
 
         const val EXTRA_DEVICE_ID = "extra.device.id"
-        const val EXTRA_MESSAGE = "extra.message"
-        const val EXTRA_MESSAGE_ID = "extra.message.id"
         const val EXTRA_PAIR = "extra.pair"
+        const val EXTRA_ACCEPT = "extra.accept"
 
         // Status reported while the adapter is off; Dart shows a banner for it. iOS uses the
         // same string.
@@ -1259,24 +1376,22 @@ class BluetoothBackgroundService : Service() {
         private const val PREFS_NAME = "ble_service_prefs"
         private const val PREF_ADVERTISING = "pref_advertising"
         private const val PREF_CENTRAL = "pref_central"
-        private const val FLUTTER_PREFS_NAME = "FlutterSharedPreferences"
-        private const val FLUTTER_REGISTERED_DEVICES_KEY =
-            "flutter.prefs_registered_devices"
         private const val NOTIFICATION_CHANNEL_ID = "ble_background"
         private const val NOTIFICATION_ID = 2001
-        const val MESSAGE_CHANNEL_ID = "ble_messages"
-        const val MESSAGE_NOTIFICATION_ID = 3001
+        private const val OLD_MESSAGE_CHANNEL_ID = "ble_messages"
         private val SERVICE_UUID = UUID.fromString("1f9ed31d-b738-4d4c-a6d8-86dbf0f9c001")
         private val SERVICE_PARCEL_UUID = ParcelUuid(SERVICE_UUID)
+        // Protocol v1 frames. Changed from the raw-UTF-8 chat characteristic
+        // (db912050-…) so old and new builds don't misread each other (14절).
         private val MESSAGE_CHARACTERISTIC_UUID =
-            UUID.fromString("db912050-2e4e-4c4e-a543-e89121e57595")
+            UUID.fromString("002069ac-115d-4391-8772-13e44df757fc")
         private const val DEFAULT_ATT_MTU = 23
         private const val MAX_ATT_MTU = 517
-        private const val ATT_HEADER_SIZE = 3
-        private const val MAX_ATTRIBUTE_LENGTH = 512
         private const val SCAN_RETRY_DELAY_MS = 30_000L
         private const val SCAN_MODE_DEBOUNCE_MS = 2_000L
         private const val NEARBY_REFRESH_MS = 30_000L
+        private const val AUTO_CONNECT_INTERVAL_MS = 10_000L
+        private const val TAG = "BleService"
         private val CLIENT_CONFIG_DESCRIPTOR_UUID =
             UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
     }

@@ -57,11 +57,12 @@ void main() {
 
     await tester.pageBack();
     await tester.pumpAndSettle();
-    await tester.tap(find.byIcon(Icons.notifications_none));
-    await tester.pumpAndSettle();
     await nativeEvent({'type': 'connected', 'deviceId': 'AA:AA'});
-    await nativeEvent({'type': 'message', 'deviceId': 'AA:AA', 'message': 'hi'});
-    expect(find.text('hi'), findsOneWidget);
+    await tester.tap(find.text('(Unknown)'));
+    await tester.pumpAndSettle();
+    expect(find.widgetWithText(FilledButton, '연결됨'), findsOneWidget);
+    await nativeEvent({'type': 'disconnected', 'deviceId': 'AA:AA'});
+    expect(find.widgetWithText(FilledButton, '연결'), findsOneWidget);
 
     await tester.pageBack();
     await tester.pumpAndSettle();
