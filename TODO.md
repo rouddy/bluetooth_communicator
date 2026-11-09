@@ -214,7 +214,8 @@
 - `AppDelegate.swift`는 아직 예전 방식(UTF-8 바이트 그대로, 예전 characteristic `DB912050-…`)이라 새 Android 빌드와 통신하지 못합니다. 새 채널 메서드(`removeDevice`, `respondPairing`)와 이벤트(`peers`, `pairingRequest` 등)도 없습니다.
 - 수정 방향: 코덱, 암호(CryptoKit), `ProtocolEngine`을 Swift로 옮기고, Kotlin JVM 테스트와 같은 테스트 벡터로 확인합니다(docs/protocol.md 14절 1단계). iOS는 AIDL이 없으므로 `IBleCommunicator`에 해당하는 부분은 없습니다. 승인 화면은 포그라운드에서만 띄울 수 있으므로 백그라운드에서는 REJECT(CANNOT_PROMPT)입니다.
 
-### 32. GATT 작업에 시간 제한이 없음 `코드`
+### 32. GATT 작업에 시간 제한이 없음 `코드` ✅ 해결
+- 해결: `GattOperationQueue`가 작업마다 10초 제한을 둡니다. 그 안에 콜백이 오지 않으면 그 작업과 뒤에 쌓인 작업을 모두 `GATT operation timed out`으로 실패시키고 서비스에 알립니다. 스택은 그 작업을 아직 진행 중으로 보기 때문에, 같은 연결에서는 다음 작업을 할 수 없습니다. 서비스는 central 역할이면 GATT client 연결을 끊고 닫은 뒤, 앱 페어링한 peer면 다시 연결합니다. 구독(CCCD write)에서 시간이 넘으면 `Subscribing to … failed` 오류도 표시됩니다. peripheral 역할이면 링크를 내리고 `cancelConnection`을 요청합니다(`closeLink`와 같은 처리). ACK를 받지 못한 메시지는 엔진이 대기열로 되돌리므로, TTL 안에 다시 연결되면 전송됩니다. 테스트: `GattOperationQueueTest`(JVM, 가상 시계)에 시간 초과 테스트 3개를 추가했습니다. 콜백이 오지 않는 상황은 기기에서 만들 수 없어서 확인하지 못했습니다.
 - `GattOperationQueue`는 콜백이 오지 않으면 그 링크의 다음 조각을 영원히 기다립니다. 메시지는 TTL이 지나면 실패로 끝나지만, 그 링크는 끊길 때까지 쓸 수 없습니다.
 - 수정 방향: 작업마다 시간 제한(예: 10초)을 두고, 넘으면 실패로 처리하고 링크를 닫습니다.
 

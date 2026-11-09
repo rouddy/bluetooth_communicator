@@ -666,7 +666,7 @@ class BluetoothBackgroundService : Service(), BleTransport {
                     done(false, null)
                     return
                 }
-                serverQueues.getOrPut(target.address) { GattOperationQueue() }.enqueue(
+                serverQueue(target.address).enqueue(
                     GattOperationQueue.Operation(start = { notifyFrame(server, central, characteristic, frame) }, onComplete = done)
                 )
             }
@@ -772,8 +772,46 @@ class BluetoothBackgroundService : Service(), BleTransport {
         }
     }
 
-    private fun clientQueue(address: String) =
-        clientQueues.getOrPut(address) { GattOperationQueue() }
+    private fun clientQueue(address: String) = clientQueues.getOrPut(address) {
+        GattOperationQueue(BleRuntime.scheduler) { onClientOperationTimeout(address) }
+    }
+
+    private fun serverQueue(address: String) = serverQueues.getOrPut(address) {
+        GattOperationQueue(BleRuntime.scheduler) { onServerOperationTimeout(address) }
+    }
+
+    // A GATT callback that never came: the stack still counts that operation as
+    // outstanding, so the connection can't run another one. The queue has failed its
+    // operations; close our client connection as if it had dropped, and reconnect a
+    // paired peer.
+    @SuppressLint("MissingPermission")
+    private fun onClientOperationTimeout(address: String) {
+        Log.w(TAG, "GATT operation to $address timed out; closing the connection")
+        val gatt = activeConnections.remove(address)
+        // close() unregisters the callback, so onConnectionStateChange won't report this.
+        dropClientLink(address)
+        userInitiated.remove(address)
+        gatt?.let {
+            runCatching {
+                it.disconnect()
+                it.close()
+            }
+        }
+        emitDisconnected(address)
+        gatt?.let { reconnectIfNeeded(it.device) }
+        emitStatus()
+    }
+
+    // The same for a notification to a central. The server can only ask the stack to
+    // disconnect it (other apps may hold the connection), as closeLink does.
+    @SuppressLint("MissingPermission")
+    private fun onServerOperationTimeout(address: String) {
+        Log.w(TAG, "Notification to $address timed out; dropping the link")
+        serverQueues.remove(address)
+        dropServerLink(address)
+        subscribedCentrals[address]?.let { central -> runCatching { gattServer?.cancelConnection(central) } }
+        emitStatus()
+    }
 
     private fun failQueues(queues: ConcurrentHashMap<String, GattOperationQueue>, error: String) {
         val drained = queues.values.toList()

@@ -75,7 +75,8 @@ object BleRuntime : EngineHost {
     var peerSnapshot: List<PeerSummary> = emptyList()
         private set
 
-    private val scheduler = object : Scheduler {
+    /** Timers on the main looper, for the engine and the service's GATT queues. */
+    val scheduler: Scheduler = object : Scheduler {
         override fun now() = SystemClock.elapsedRealtime()
 
         override fun schedule(delayMs: Long, action: () -> Unit): Cancellable {
