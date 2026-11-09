@@ -168,6 +168,31 @@ final class EngineTests: XCTestCase {
     }
   }
 
+  func testAReplyReachesThePeerEvenIfItsCapsDontListThePath() {
+    // A asks for B's clipboard but doesn't offer its own.
+    a.caps = Capabilities(builtins: [], apps: [testApp])
+    b.caps = Capabilities(builtins: [ClipboardMessage.path], apps: [testApp])
+    pair()
+
+    var request: [Int] = []
+    a.engine.send(peerId: b.peerId, path: ClipboardMessage.path, payload: ClipboardMessage.request(), replyTo: 0, ttlMs: 0, app: nil) {
+      request.append($0)
+    }
+    settle()
+    guard let asked = b.delivered.first else { return XCTFail("no request") }
+    var reply: [Int] = []
+    b.engine.send(
+      peerId: a.peerId, path: ClipboardMessage.path, payload: ClipboardMessage.replyWithText("hi"), replyTo: asked.msgId,
+      ttlMs: 0, app: nil
+    ) { reply.append($0) }
+    settle()
+
+    XCTAssertEqual(request, [DeliveryStatus.ok])
+    XCTAssertEqual(reply, [DeliveryStatus.ok])
+    XCTAssertEqual(a.delivered.first.flatMap { ClipboardMessage.decodeReply($0.payload) }?.text, "hi")
+    XCTAssertEqual(a.delivered.first?.replyTo, asked.msgId)
+  }
+
   func testAMessageSentWhileThePeerIsAwayWaitsWithinTheTtl() {
     pair().drop()
 

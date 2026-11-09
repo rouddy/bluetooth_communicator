@@ -141,6 +141,9 @@ vectors = {
         "ack": envelope(0x02, 0, 0, struct.pack("<I", 41) + bytes([1])).hex(),
         "caps": envelope(0x03, 0, 9, caps_body).hex(),
         "unpair": envelope(0x04, 0x01, 10, b"").hex(),
+        # /clipboard (10절): a GET_TEXT request, and an OK reply carrying the text.
+        "clipboardRequest": data_envelope(12, 0x01, "/clipboard", 0, bytes([0])).hex(),
+        "clipboardReply": data_envelope(13, 0x02, "/clipboard", 12, bytes([0]) + "복사한 텍스트".encode()).hex(),
     },
     "records": {
         "auth": (bytes([1, 0x02]) + bytes([0xAA]) * 32).hex(),

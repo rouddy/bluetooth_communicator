@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		9EDAB77146CCB9770D2F90BA /* Clipboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D6388CE1CDB342C74D40F78 /* Clipboard.swift */; };
 		3AB9133377F63CE4BD647C3E /* IOSPeerStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 91AF0DBA8B3FBEEAF1B46056 /* IOSPeerStore.swift */; };
 		95344A6B321E0E40C762D92B /* EngineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD5BC970498535E648701B84 /* EngineTests.swift */; };
 		DAFF310809C1F95A3A77A72B /* EngineHarness.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29175F5D6638DF868305D5AD /* EngineHarness.swift */; };
@@ -53,6 +54,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		1D6388CE1CDB342C74D40F78 /* Clipboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Clipboard.swift; sourceTree = "<group>"; };
 		91AF0DBA8B3FBEEAF1B46056 /* IOSPeerStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IOSPeerStore.swift; sourceTree = "<group>"; };
 		BD5BC970498535E648701B84 /* EngineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineTests.swift; sourceTree = "<group>"; };
 		29175F5D6638DF868305D5AD /* EngineHarness.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineHarness.swift; sourceTree = "<group>"; };
@@ -98,6 +100,7 @@
 		305D078B1B61BABB936C7BA3 /* Protocol */ = {
 			isa = PBXGroup;
 			children = (
+				1D6388CE1CDB342C74D40F78 /* Clipboard.swift */,
 				BC266A8742F21BCD83834FE5 /* Engine.swift */,
 				66C89D7B426282BD2A562C66 /* Crypto.swift */,
 				E7BC6B6EF29DEB6C9865434A /* Envelopes.swift */,
@@ -326,6 +329,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				9EDAB77146CCB9770D2F90BA /* Clipboard.swift in Sources */,
 				3AB9133377F63CE4BD647C3E /* IOSPeerStore.swift in Sources */,
 				29ED770145C40B4F2CEA8825 /* Engine.swift in Sources */,
 				62C97C7590A311A78F8D99BD /* Crypto.swift in Sources */,

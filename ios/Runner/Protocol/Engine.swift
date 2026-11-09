@@ -1284,7 +1284,8 @@ final class ProtocolEngine {
   private func pumpChannel(_ channel: PeerChannel) {
     guard let link = channel.link, link.phase == .established, !link.closed else { return }
     while channel.inFlight.count < ProtocolEngine.maxInFlight, let next = channel.outbox.first {
-      if case .data(let data) = next.envelope {
+      // A reply answers the peer's own request, whatever its CAPS list.
+      if case .data(let data) = next.envelope, !data.isReply {
         // Wait for the peer's CAPS (sent right after the session starts).
         guard let caps = channel.caps else { return }
         if !allows(caps, data.path, next.app) {

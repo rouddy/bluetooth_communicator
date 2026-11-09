@@ -283,6 +283,29 @@ class EngineTest {
     }
 
     @Test
+    fun `a reply reaches the peer even if its CAPS don't list the path`() {
+        // A asks for B's clipboard but doesn't offer its own.
+        a.caps = Capabilities(emptyList(), listOf(TEST_APP))
+        b.caps = Capabilities(listOf(ClipboardMessage.PATH), listOf(TEST_APP))
+        pair()
+
+        val request = mutableListOf<Int>()
+        a.engine.send(b.peerId, ClipboardMessage.PATH, ClipboardMessage.request(), 0, 0, null) { request += it }
+        settle()
+        val asked = b.delivered.single()
+        val reply = mutableListOf<Int>()
+        b.engine.send(a.peerId, ClipboardMessage.PATH, ClipboardMessage.replyWithText("hi"), asked.msgId, 0, null) {
+            reply += it
+        }
+        settle()
+
+        assertEquals(listOf(DeliveryStatus.OK), request)
+        assertEquals(listOf(DeliveryStatus.OK), reply)
+        assertEquals("hi", ClipboardMessage.decodeReply(a.delivered.single().payload)?.text)
+        assertEquals(asked.msgId, a.delivered.single().replyTo)
+    }
+
+    @Test
     fun `a message sent while the peer is away waits for it within the TTL`() {
         pair().drop()
 

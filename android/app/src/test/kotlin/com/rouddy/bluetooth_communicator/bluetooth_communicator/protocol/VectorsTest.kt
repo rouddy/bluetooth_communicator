@@ -98,7 +98,11 @@ class VectorsTest {
             "dataReply" to Envelope.Data(7, Envelope.FLAG_REPLY, "/control/media", 41, byteArrayOf(0, 1)),
             "ack" to Envelope.Ack(41, DeliveryStatus.NO_RECEIVER),
             "caps" to Envelope.Caps(9, listOf("/control/media"), listOf(app)),
-            "unpair" to Envelope.Unpair(10)
+            "unpair" to Envelope.Unpair(10),
+            "clipboardRequest" to Envelope.Data(12, Envelope.FLAG_ACK_REQ, ClipboardMessage.PATH, 0, ClipboardMessage.request()),
+            "clipboardReply" to Envelope.Data(
+                13, Envelope.FLAG_REPLY, ClipboardMessage.PATH, 12, ClipboardMessage.replyWithText("복사한 텍스트")
+            )
         ).forEach { (name, envelope) ->
             assertArrayEquals(name, envelopes.hex(name), Envelope.encode(envelope))
             assertArrayEquals(name, envelopes.hex(name), Envelope.encode(Envelope.decode(envelopes.hex(name))))

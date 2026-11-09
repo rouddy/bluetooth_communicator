@@ -1242,7 +1242,8 @@ class ProtocolEngine(
         while (channel.inFlight.size < MAX_IN_FLIGHT) {
             val next = channel.outbox.firstOrNull() ?: return
             val data = next.envelope as? Envelope.Data
-            if (data != null) {
+            // A reply answers the peer's own request, whatever its CAPS list.
+            if (data != null && !data.isReply) {
                 // Wait for the peer's CAPS (sent right after the session starts).
                 val caps = channel.caps ?: return
                 if (!allows(caps, data.path, next.app)) {
