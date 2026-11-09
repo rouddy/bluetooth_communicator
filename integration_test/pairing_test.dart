@@ -13,6 +13,9 @@
 // - MODE=setup: only turn on advertising and scanning and set the name. With
 //   --keep-app-running the app then stays up for steps driven from the peer.
 // - MODE=remove: delete the peer from its page (UNPAIR).
+// - MODE=clipboard: take the peer's clipboard (클립보드 가져오기) and print it; with
+//   EXPECT_CLIP, check it.
+// CLIP_TEXT puts that text into this phone's clipboard first, for the peer to take.
 // DEVICE_NAME (iOS) sets the name peers see. The phones must already be paired at the
 // OS level, or the system pairing dialogs need a person. LIVE_MINUTES keeps the app
 // drawing afterwards (a finished test's UI is frozen), to watch it while the other
@@ -20,6 +23,7 @@
 
 import 'package:bluetooth_communicator/main.dart' as app;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 
@@ -29,6 +33,8 @@ const _peerName = String.fromEnvironment('PEER_NAME');
 const _mode = String.fromEnvironment('MODE', defaultValue: 'connect');
 const _deviceName = String.fromEnvironment('DEVICE_NAME');
 const _liveMinutes = int.fromEnvironment('LIVE_MINUTES');
+const _clipText = String.fromEnvironment('CLIP_TEXT');
+const _expectClip = String.fromEnvironment('EXPECT_CLIP');
 
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
@@ -42,10 +48,27 @@ void main() {
       await setDeviceName(tester, _deviceName);
     }
 
+    if (_clipText.isNotEmpty) {
+      await Clipboard.setData(const ClipboardData(text: _clipText));
+    }
     if (_mode == 'setup') {
       return stayLive(tester);
     }
     final peer = find.textContaining(_peerName);
+    if (_mode == 'clipboard') {
+      await pumpUntilFound(tester, peer);
+      await tester.tap(peer.first);
+      await tester.pumpAndSettle();
+      await pumpUntilFound(tester, find.text('상대 기기의 클립보드를 이 기기에 복사합니다'));
+      await tester.tap(find.text('클립보드 가져오기'));
+      await pumpUntilFound(tester, find.textContaining('클립보드를 가져왔습니다'), timeout: const Duration(seconds: 70));
+      final copied = (await Clipboard.getData(Clipboard.kTextPlain))?.text;
+      debugPrint('[clipboard] $copied');
+      if (_expectClip.isNotEmpty) {
+        expect(copied, _expectClip);
+      }
+      return stayLive(tester);
+    }
     if (_mode == 'remove') {
       await pumpUntilFound(tester, peer);
       await tester.tap(peer.first);
