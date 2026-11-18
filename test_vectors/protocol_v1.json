@@ -48,7 +48,9 @@
     "dataReply": "0102070000000e2f636f6e74726f6c2f6d65646961290000000001",
     "ack": "0200000000002900000001",
     "caps": "030009000000010e002f636f6e74726f6c2f6d656469610230000f636f6d2e6578616d706c652e617070abababababababababababababababababababababababababababababababab",
-    "unpair": "04010a000000"
+    "unpair": "04010a000000",
+    "clipboardRequest": "01010c0000000a2f636c6970626f61726400",
+    "clipboardReply": "01020d0000000a2f636c6970626f6172640c00000000ebb3b5ec82aced959c20ed858dec8aa4ed8ab8"
   },
   "records": {
     "auth": "0102aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",

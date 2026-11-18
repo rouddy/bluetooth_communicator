@@ -13,6 +13,7 @@ const String _bleEventsChannelName =
 const String _prefsAdvertisingEnabled = 'prefs_advertising_enabled';
 const String _prefsCentralEnabled = 'prefs_central_enabled';
 const String _prefsDeviceName = 'prefs_device_name';
+const String _prefsClipboardSharing = 'prefs_clipboard_sharing';
 const String _prefsPairingLost = 'prefs_pairing_lost';
 
 /// Keys that are no longer used, deleted on launch: the removed chat's message
@@ -46,6 +47,7 @@ class _MyAppState extends State<MyApp> {
   final _messengerKey = GlobalKey<ScaffoldMessengerState>();
   final _navigatorKey = GlobalKey<NavigatorState>();
   StreamSubscription<String>? _errors;
+  StreamSubscription<String>? _notices;
   StreamSubscription<PairingRequest>? _pairingPrompts;
 
   /// Devices whose pairing dialog is open, so a replayed request doesn't open a
@@ -57,13 +59,16 @@ class _MyAppState extends State<MyApp> {
     super.initState();
     // Errors used to show up only on the settings page; surface each one where the
     // user is, whatever page that is.
-    _errors = widget.controller.errors.listen((message) {
-      _messengerKey.currentState
-        ?..hideCurrentSnackBar()
-        ..showSnackBar(SnackBar(content: Text(message)));
-    });
+    _errors = widget.controller.errors.listen(_showSnackBar);
+    _notices = widget.controller.notices.listen(_showSnackBar);
     // Either phone can be asked to approve a pairing, whatever page is open.
     _pairingPrompts = widget.controller.pairingPrompts.listen(_showPairingDialog);
+  }
+
+  void _showSnackBar(String message) {
+    _messengerKey.currentState
+      ?..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
   }
 
   Future<void> _showPairingDialog(PairingRequest request) async {
@@ -85,6 +90,7 @@ class _MyAppState extends State<MyApp> {
   @override
   void dispose() {
     _errors?.cancel();
+    _notices?.cancel();
     _pairingPrompts?.cancel();
     super.dispose();
   }
@@ -397,6 +403,12 @@ class _SettingsPageState extends State<SettingsPage> {
             value: controller.centralEnabled,
             onChanged: controller.setCentralEnabled,
           ),
+          SwitchListTile(
+            title: const Text('클립보드 공유'),
+            subtitle: const Text('연결된 기기가 이 기기의 클립보드를 가져갈 수 있습니다'),
+            value: controller.clipboardSharing,
+            onChanged: controller.setClipboardSharing,
+          ),
           if (BleAppController.canSetDeviceName)
             ListTile(
               leading: const Icon(Icons.badge_outlined),
@@ -586,6 +598,29 @@ class DeviceControlPage extends StatelessWidget {
     };
   }
 
+  /// Copies the peer's clipboard to this phone's (docs/protocol.md 10절).
+  Widget _clipboardTile(bool isConnected) {
+    final state = controller.clipboardRequests[device.identifier];
+    return ListTile(
+      leading: const Icon(Icons.content_paste_go),
+      title: const Text('클립보드 가져오기'),
+      subtitle: Text(switch (state) {
+        ClipboardRequestState.requesting => '가져오는 중…',
+        ClipboardRequestState.waiting => '상대 기기에서 확인을 기다리는 중…',
+        null when isConnected => '상대 기기의 클립보드를 이 기기에 복사합니다',
+        null => '연결되면 쓸 수 있습니다',
+      }),
+      enabled: isConnected && state == null,
+      trailing: state == null
+          ? null
+          : const SizedBox.square(
+              dimension: 16,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            ),
+      onTap: () => controller.requestClipboard(device.identifier),
+    );
+  }
+
   Widget _buildPage(BuildContext context) {
     final isConnected = controller.connectedDeviceIds.contains(device.identifier);
     final peerId = controller.peerFor(device.identifier)?.peerId;
@@ -611,6 +646,7 @@ class DeviceControlPage extends StatelessWidget {
             subtitle: Text(device.identifier),
             trailing: _linkButton(),
           ),
+          if (peerId != null || isConnected) _clipboardTile(isConnected),
           if (peerId != null)
             ListTile(
               leading: const Icon(Icons.fingerprint),
@@ -670,6 +706,12 @@ class BleAppController extends ChangeNotifier {
   /// every phone's name as "iPhone", so the user sets one. Empty means the default.
   String deviceName = '';
 
+  /// Whether peers may take this phone's clipboard (`/clipboard`).
+  bool clipboardSharing = true;
+
+  /// Our clipboard requests in progress, by device.
+  final Map<String, ClipboardRequestState> clipboardRequests = <String, ClipboardRequestState>{};
+
   /// Whether this platform lets the user name the device ([deviceName]).
   static bool get canSetDeviceName => defaultTargetPlatform == TargetPlatform.iOS;
   /// The last native status; null until the first status event.
@@ -688,6 +730,11 @@ class BleAppController extends ChangeNotifier {
     lastError = message;
     _errors.add(message);
   }
+
+  final StreamController<String> _notices = StreamController<String>.broadcast();
+
+  /// Things that went well, for a SnackBar; unlike [errors], not kept.
+  Stream<String> get notices => _notices.stream;
 
   void clearError() {
     lastError = null;
@@ -844,6 +891,7 @@ class BleAppController extends ChangeNotifier {
     }
     lastError = null;
     await _invoke('initialize');
+    await _invoke('setClipboardSharing', {'enabled': clipboardSharing});
     if (canSetDeviceName && deviceName.isNotEmpty) {
       await _invoke('setDeviceName', {'name': deviceName});
     }
@@ -879,6 +927,58 @@ class BleAppController extends ChangeNotifier {
   Future<void> scanNow() async {
     await _invoke('scanNow');
   }
+
+  Future<void> setClipboardSharing(bool enabled) async {
+    clipboardSharing = enabled;
+    await _prefs?.setBool(_prefsClipboardSharing, enabled);
+    notifyListeners();
+    await _invoke('setClipboardSharing', {'enabled': enabled});
+  }
+
+  /// Asks [deviceId] for its clipboard; the text lands in this phone's clipboard
+  /// (`clipboard` events).
+  Future<void> requestClipboard(String deviceId) async {
+    if (clipboardRequests.containsKey(deviceId)) {
+      return;
+    }
+    clipboardRequests[deviceId] = ClipboardRequestState.requesting;
+    notifyListeners();
+    if (!await _invoke('requestClipboard', {'deviceId': deviceId})) {
+      clipboardRequests.remove(deviceId);
+      notifyListeners();
+    }
+  }
+
+  Future<void> _onClipboard(String deviceId, Map<String, dynamic> event) async {
+    final result = event['result'] as String? ?? 'failed';
+    if (result == 'waiting') {
+      clipboardRequests[deviceId] = ClipboardRequestState.waiting;
+      return;
+    }
+    clipboardRequests.remove(deviceId);
+    final name = _displayName(deviceId);
+    final text = event['text'] as String?;
+    if (result == 'ok' && text != null) {
+      await Clipboard.setData(ClipboardData(text: text));
+      _notices.add('$name의 클립보드를 가져왔습니다. 붙여넣을 수 있습니다.');
+    } else {
+      _reportError(_clipboardFailure(name, result, event['status'] as int?));
+    }
+    notifyListeners();
+  }
+
+  static String _clipboardFailure(String name, String result, int? status) => switch (result) {
+    'empty' => '$name의 클립보드가 비어 있습니다.',
+    'notText' => '$name의 클립보드에 텍스트가 없습니다.',
+    'unavailable' => '$name에서 앱을 열어야 클립보드를 가져올 수 있습니다.',
+    'denied' => '$name에서 클립보드 공유를 허용하지 않았습니다.',
+    'tooLarge' => '$name의 클립보드 내용이 너무 깁니다.',
+    'timeout' => '$name에서 응답이 없습니다.',
+    // NO_RECEIVER/UNSUPPORTED: an app version without /clipboard.
+    _ when status == 1 || status == 2 => '$name의 앱이 클립보드 가져오기를 지원하지 않습니다. 앱을 업데이트해 주세요.',
+    _ when status == 1000 => '$name와(과) 연결되어 있지 않습니다.',
+    _ => '$name의 클립보드를 가져오지 못했습니다.',
+  };
 
   Future<void> setDeviceName(String name) async {
     deviceName = name.trim();
@@ -1220,6 +1320,16 @@ class BleAppController extends ChangeNotifier {
           _reportError(message);
         }
         break;
+      case 'clipboard':
+        if (event['deviceId'] case final String id) {
+          unawaited(_onClipboard(id, event));
+        }
+        break;
+      case 'clipboardShared':
+        if (event['deviceId'] case final String id) {
+          _notices.add('${_displayName(id)}에 클립보드를 보냈습니다.');
+        }
+        break;
       case 'log':
         // Native protocol and Bluetooth decisions, for debugging on a device.
         if (!kReleaseMode && event['message'] is String) {
@@ -1240,6 +1350,7 @@ class BleAppController extends ChangeNotifier {
     advertisingEnabled = prefs.getBool(_prefsAdvertisingEnabled) ?? false;
     centralEnabled = prefs.getBool(_prefsCentralEnabled) ?? false;
     deviceName = prefs.getString(_prefsDeviceName) ?? '';
+    clipboardSharing = prefs.getBool(_prefsClipboardSharing) ?? true;
     // initialize() can run again (permission retry); the in-memory state is newer
     // than what's stored by then.
     if (!_stateLoaded) {
@@ -1258,6 +1369,7 @@ class BleAppController extends ChangeNotifier {
     _eventsSubscription?.cancel();
     _pruneTimer?.cancel();
     _errors.close();
+    _notices.close();
     _pairingPrompts.close();
     for (final timer in _connectTimeouts.values) {
       timer.cancel();
@@ -1365,6 +1477,14 @@ class BleStatus {
     ];
     return parts.isEmpty ? 'idle' : parts.join(' ');
   }
+}
+
+enum ClipboardRequestState {
+  /// Sent; no answer yet.
+  requesting,
+
+  /// The peer's app couldn't read its clipboard yet and asked its user.
+  waiting,
 }
 
 enum LinkState {

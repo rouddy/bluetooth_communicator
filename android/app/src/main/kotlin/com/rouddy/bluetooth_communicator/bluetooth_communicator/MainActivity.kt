@@ -16,6 +16,7 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        BleRuntime.init(this)
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, methodChannelName)
             .setMethodCallHandler { call, result ->
@@ -72,6 +73,19 @@ class MainActivity : FlutterActivity() {
                         )
                         result.success(null)
                     }
+                    "requestClipboard" -> {
+                        val deviceId = call.argument<String>("deviceId")
+                        if (deviceId == null) {
+                            result.error("BAD_ARGS", "deviceId is required", null)
+                        } else {
+                            BleRuntime.post { ClipboardShare.request(deviceId) }
+                            result.success(null)
+                        }
+                    }
+                    "setClipboardSharing" -> {
+                        ClipboardShare.sharingEnabled = call.argument<Boolean>("enabled") != false
+                        result.success(null)
+                    }
                     "respondPairing" -> {
                         val started = startServiceAction(
                             BluetoothBackgroundService.ACTION_RESPOND_PAIRING,
@@ -109,6 +123,16 @@ class MainActivity : FlutterActivity() {
         manager.activeNotifications
             .filter { it.notification.channelId == BleRuntime.PAIRING_CHANNEL_ID }
             .forEach { manager.cancel(it.tag, it.id) }
+    }
+
+    // Clipboard requests that arrived while the app wasn't on screen wait for this
+    // (ClipboardShare): only the focused app may read the clipboard.
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        BleEventBus.appHasFocus = hasFocus
+        if (hasFocus) {
+            BleRuntime.post { ClipboardShare.onFocus() }
+        }
     }
 
     override fun onPause() {

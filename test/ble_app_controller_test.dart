@@ -111,6 +111,7 @@ void main() {
 
       expect(nativeCalls.map((c) => c.method), [
         'initialize',
+        'setClipboardSharing',
         'setCentralEnabled',
         'scanNow',
       ]);
@@ -135,6 +136,7 @@ void main() {
 
       expect(nativeCalls.map((c) => c.method), [
         'initialize',
+        'setClipboardSharing',
         'setAdvertisingEnabled',
         'setCentralEnabled',
         'scanNow',

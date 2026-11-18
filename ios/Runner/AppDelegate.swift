@@ -64,6 +64,14 @@ import UIKit
         let args = call.arguments as? [String: Any]
         self.bleManager.respondPairing(args?["deviceId"] as? String, accept: (args?["accept"] as? Bool) ?? false)
         result(nil)
+      case "requestClipboard":
+        let args = call.arguments as? [String: Any]
+        self.bleManager.requestClipboard(args?["deviceId"] as? String)
+        result(nil)
+      case "setClipboardSharing":
+        let args = call.arguments as? [String: Any]
+        self.bleManager.setClipboardSharing((args?["enabled"] as? Bool) ?? true)
+        result(nil)
       case "setDeviceName":
         let args = call.arguments as? [String: Any]
         self.bleManager.setDeviceName(args?["name"] as? String)
@@ -480,11 +488,157 @@ final class IOSBleBackgroundManager: NSObject, FlutterStreamHandler, EngineHost 
     UIApplication.shared.applicationState == .active && eventSink != nil
   }
 
-  /// iOS has no AIDL, so it receives no app messages and no built-in paths yet.
-  func localCaps() -> Capabilities { Capabilities(builtins: [], apps: []) }
+  /// iOS has no AIDL, so it receives no app messages; of the built-in paths, only
+  /// `/clipboard`.
+  func localCaps() -> Capabilities { Capabilities(builtins: [ClipboardMessage.path], apps: []) }
 
   func deliver(peerId: PeerId, data: DataEnvelope, done: @escaping (Int) -> Void) {
+    if data.path == ClipboardMessage.path {
+      if data.isReply {
+        onClipboardReply(data)
+        done(DeliveryStatus.ok)
+      } else {
+        onClipboardRequest(peerId: peerId, data: data, done: done)
+      }
+      return
+    }
     done(data.path.hasPrefix("/") ? DeliveryStatus.unsupported : DeliveryStatus.noReceiver)
+  }
+
+  // MARK: - Clipboard (/clipboard, 10절)
+
+  private let clipboardSharingKey = "rbc_clipboard_sharing"
+  /// How long our request waits for the final answer.
+  private let clipboardTimeoutMs: Int64 = 60_000
+  // Our requests waiting for the final answer, by msgId.
+  private var clipboardRequests: [UInt32: (deviceId: String, timeout: DispatchWorkItem)] = [:]
+
+  /// Whether peers may read this phone's clipboard (the 클립보드 공유 setting).
+  private var clipboardSharing: Bool { prefs.object(forKey: clipboardSharingKey) as? Bool ?? true }
+
+  func setClipboardSharing(_ enabled: Bool) {
+    prefs.set(enabled, forKey: clipboardSharingKey)
+  }
+
+  /// Asks the peer at `deviceId` for its clipboard; answered by `clipboard` events.
+  func requestClipboard(_ deviceId: String?) {
+    guard let deviceId else { return }
+    guard let peerId = peerId(forDevice: deviceId) else {
+      emitClipboard(deviceId, "failed", status: DeliveryStatus.expiredNotSent)
+      return
+    }
+    var msgId: UInt32 = 0
+    var failedEarly: Int?
+    msgId = engine.send(
+      peerId: peerId, path: ClipboardMessage.path, payload: ClipboardMessage.request(), replyTo: 0,
+      ttlMs: clipboardTimeoutMs, app: nil
+    ) { [weak self] status in
+      guard status != DeliveryStatus.ok else { return }
+      // A local failure can come before send returns the msgId.
+      if msgId == 0 {
+        failedEarly = status
+      } else if let self, let device = self.finishClipboard(msgId) {
+        self.emitClipboard(device, "failed", status: status)
+      }
+    }
+    if let failedEarly {
+      emitClipboard(deviceId, "failed", status: failedEarly)
+      return
+    }
+    guard msgId != 0 else {
+      emitClipboard(deviceId, "failed", status: DeliveryStatus.malformed)
+      return
+    }
+    let id = msgId
+    let timeout = DispatchWorkItem { [weak self] in
+      guard let self, let device = self.finishClipboard(id) else { return }
+      self.emitClipboard(device, "timeout")
+    }
+    clipboardRequests[id] = (deviceId: deviceId, timeout: timeout)
+    DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(Int(clipboardTimeoutMs)), execute: timeout)
+  }
+
+  private func onClipboardReply(_ data: DataEnvelope) {
+    guard let request = clipboardRequests[data.replyTo], let reply = ClipboardMessage.decodeReply(data.payload) else {
+      return
+    }
+    if reply.result == ClipboardMessage.waiting {
+      emitClipboard(request.deviceId, "waiting")
+      return
+    }
+    _ = finishClipboard(data.replyTo)
+    emitClipboard(request.deviceId, ClipboardMessage.resultName(reply.result), text: reply.text)
+  }
+
+  /// Ends our request `msgId`; returns its device, or nil if it already ended.
+  private func finishClipboard(_ msgId: UInt32) -> String? {
+    guard let request = clipboardRequests.removeValue(forKey: msgId) else { return nil }
+    request.timeout.cancel()
+    return request.deviceId
+  }
+
+  /// iOS lets only the active app read the pasteboard, and there's no way to ask the
+  /// user from the background yet, so a request then gets UNAVAILABLE.
+  private func onClipboardRequest(peerId: PeerId, data: DataEnvelope, done: @escaping (Int) -> Void) {
+    guard ClipboardMessage.isGetText(data.payload) else {
+      done(DeliveryStatus.unsupported)
+      return
+    }
+    // The ACK says the request arrived; the clipboard comes in the reply.
+    done(DeliveryStatus.ok)
+    let deviceId = deviceId(forPeer: peerId)
+    let reply = { [weak self] (payload: Data) -> Void in
+      _ = self?.engine.send(
+        peerId: peerId, path: ClipboardMessage.path, payload: payload, replyTo: data.msgId, ttlMs: 0, app: nil
+      ) { status in
+        if status == DeliveryStatus.ok && ClipboardMessage.decodeReply(payload)?.result == ClipboardMessage.ok {
+          self?.emit(type: "clipboardShared", payload: ["deviceId": deviceId])
+        }
+      }
+    }
+    guard clipboardSharing else { return reply(ClipboardMessage.reply(ClipboardMessage.denied)) }
+    guard UIApplication.shared.applicationState == .active else {
+      return reply(ClipboardMessage.reply(ClipboardMessage.unavailable))
+    }
+    // Reading another app's content makes iOS ask the user to allow pasting, and the
+    // read waits for the answer; keep that off the main queue.
+    DispatchQueue.global(qos: .userInitiated).async {
+      let payload = IOSBleBackgroundManager.readPasteboard()
+      DispatchQueue.main.async { reply(payload) }
+    }
+  }
+
+  private static func readPasteboard() -> Data {
+    let board = UIPasteboard.general
+    guard board.hasStrings else {
+      return ClipboardMessage.reply(board.numberOfItems > 0 ? ClipboardMessage.notText : ClipboardMessage.empty)
+    }
+    // nil when the user didn't allow pasting.
+    guard let text = board.string else { return ClipboardMessage.reply(ClipboardMessage.denied) }
+    return ClipboardMessage.replyWithText(text)
+  }
+
+  private func emitClipboard(_ deviceId: String, _ result: String, text: String? = nil, status: Int? = nil) {
+    var payload: [String: Any] = ["deviceId": deviceId, "result": result]
+    payload["text"] = text
+    payload["status"] = status
+    emit(type: "clipboard", payload: payload)
+  }
+
+  private func peerId(forDevice deviceId: String) -> PeerId? {
+    for case .connected(let id, let peerId, _) in engine.connectedSessions() where id == deviceId {
+      return peerId
+    }
+    return store.peers().first {
+      $0.deviceId == deviceId || peripheralIds[$0.peerId.description] == deviceId
+    }?.peerId
+  }
+
+  private func deviceId(forPeer peerId: PeerId) -> String {
+    for case .connected(let id, let sessionPeer, _) in engine.connectedSessions() where sessionPeer == peerId {
+      return id
+    }
+    return store.peers().first { $0.peerId == peerId }?.deviceId ?? peerId.description
   }
 
   func onEvent(_ event: EngineEvent) {

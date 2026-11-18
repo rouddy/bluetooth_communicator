@@ -122,6 +122,20 @@ final class ProtocolCodecTests: XCTestCase {
     XCTAssertNil(Crypto.ecdh(alice, peerPublicKey: Data(count: 65)))
   }
 
+  func testClipboardRepliesCarryTheTextAfterTheirResult() {
+    XCTAssertEqual(ClipboardMessage.request(), Data([0]))
+    XCTAssertTrue(ClipboardMessage.isGetText(ClipboardMessage.request()))
+    XCTAssertFalse(ClipboardMessage.isGetText(Data([1])))
+    let reply = ClipboardMessage.decodeReply(ClipboardMessage.replyWithText("복사한 텍스트"))
+    XCTAssertEqual(reply?.result, ClipboardMessage.ok)
+    XCTAssertEqual(reply?.text, "복사한 텍스트")
+    XCTAssertEqual(ClipboardMessage.decodeReply(ClipboardMessage.replyWithText(nil))?.result, ClipboardMessage.empty)
+    XCTAssertEqual(
+      ClipboardMessage.decodeReply(ClipboardMessage.replyWithText(String(repeating: "가", count: 20_001)))?.result,
+      ClipboardMessage.tooLarge)
+    XCTAssertNil(ClipboardMessage.decodeReply(Data()))
+  }
+
   func testReplayWindowTakesNewAndOutOfOrderCountersOnce() {
     var window = ReplayWindow()
     for counter: UInt32 in [0, 2, 1, 5] {

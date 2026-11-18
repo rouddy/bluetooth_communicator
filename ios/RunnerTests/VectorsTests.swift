@@ -96,6 +96,11 @@ final class VectorsTests: XCTestCase {
       ("ack", .ack(refMsgId: 41, status: DeliveryStatus.noReceiver)),
       ("caps", .caps(msgId: 9, builtins: ["/control/media"], apps: [app])),
       ("unpair", .unpair(msgId: 10)),
+      ("clipboardRequest", .data(DataEnvelope(
+        msgId: 12, flags: Envelope.flagAckReq, path: ClipboardMessage.path, replyTo: 0, payload: ClipboardMessage.request()))),
+      ("clipboardReply", .data(DataEnvelope(
+        msgId: 13, flags: Envelope.flagReply, path: ClipboardMessage.path, replyTo: 12,
+        payload: ClipboardMessage.replyWithText("복사한 텍스트")))),
     ]
     for (name, envelope) in cases {
       XCTAssertEqual(Envelope.encode(envelope), hex(envelopes, name), name)

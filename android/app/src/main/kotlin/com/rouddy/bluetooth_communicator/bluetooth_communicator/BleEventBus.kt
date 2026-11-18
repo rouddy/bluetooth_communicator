@@ -24,6 +24,13 @@ object BleEventBus {
             foregroundListener?.invoke(value)
         }
 
+    /**
+     * Whether the Flutter activity's window has focus: since Android 10 only then may
+     * the app read the clipboard (ClipboardShare).
+     */
+    @Volatile
+    var appHasFocus = false
+
     /** Set by the service to adapt its scan mode; called on the main thread. */
     var foregroundListener: ((Boolean) -> Unit)? = null
 
