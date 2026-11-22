@@ -1254,11 +1254,13 @@ final class ProtocolEngine {
   /// Sends `payload` to `path` on `peerId`. `callback` gets an ACK status or a local
   /// result (`DeliveryStatus`) exactly once. Returns the msgId, or 0 if it failed
   /// right away. `app` is the sending app, checked against the peer's CAPS. A `bulk`
-  /// message (a file chunk) goes out after every other kind (9절).
+  /// message (a file chunk) goes out after every other kind (9절). `msgId` is one the
+  /// caller already took from `PeerStore.nextMsgId` (Android's AIDL service returns it
+  /// to its caller first), or 0 to take one here.
   @discardableResult
   func send(
     peerId: PeerId, path: String, payload: Data, replyTo: UInt32, ttlMs: Int64, app: AppIdentity?,
-    bulk: Bool = false, callback: @escaping (Int) -> Void
+    bulk: Bool = false, msgId takenMsgId: UInt32 = 0, callback: @escaping (Int) -> Void
   ) -> UInt32 {
     if path.isEmpty || path.utf8.count > Envelope.maxPathBytes {
       callback(DeliveryStatus.malformed)
@@ -1268,7 +1270,7 @@ final class ProtocolEngine {
     let ttl = ttlMs <= 0
       ? (control ? ProtocolEngine.controlTtlMs : ProtocolEngine.defaultTtlMs)
       : min(ttlMs, ProtocolEngine.maxTtlMs)
-    let msgId = store.nextMsgId()
+    let msgId = takenMsgId != 0 ? takenMsgId : store.nextMsgId()
     // A reply isn't acknowledged (9절).
     let flags = replyTo != 0 ? Envelope.flagReply : Envelope.flagAckReq
     let outgoing = Outgoing(

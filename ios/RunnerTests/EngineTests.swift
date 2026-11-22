@@ -208,6 +208,33 @@ final class EngineTests: XCTestCase {
     XCTAssertEqual(a.delivered.first?.replyTo, asked.msgId)
   }
 
+  func testAMsgIdTakenBeforeSendingIsTheOneSentAndAReplyToItCarriesIt() {
+    pair()
+
+    // Android's AIDL service takes the msgId first and returns it to the app before
+    // the engine sends; the peer's reply must carry that id.
+    let taken = a.store.nextMsgId()
+    var request: [Int] = []
+    let returned = a.engine.send(
+      peerId: b.peerId, path: "\(testApp.packageName)/ask", payload: Data([1]), replyTo: 0, ttlMs: 0, app: testApp,
+      msgId: taken
+    ) { request.append($0) }
+    settle()
+    guard let asked = b.delivered.first else { return XCTFail("no request") }
+    b.engine.send(
+      peerId: a.peerId, path: "\(testApp.packageName)/ask", payload: Data([2]), replyTo: asked.msgId, ttlMs: 0,
+      app: testApp
+    ) { _ in }
+    settle()
+
+    XCTAssertEqual(returned, taken)
+    XCTAssertEqual(asked.msgId, taken)
+    XCTAssertEqual(request, [DeliveryStatus.ok])
+    XCTAssertEqual(a.delivered.first?.replyTo, taken)
+    // The engine didn't take another id for it.
+    XCTAssertEqual(a.store.nextMsgId(), taken + 1)
+  }
+
   func testAMessageSentWhileThePeerIsAwayWaitsWithinTheTtl() {
     pair().drop()
 

@@ -22,4 +22,6 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 - 보낸 메시지에는 결과(`전달됨`, `받을 앱 없음`, `보내지 못함(시간 초과)` 등)가 표시됩니다.
 - 앱이 열려 있으면 등록한 listener로, 닫혀 있으면 `ReceiveService`로 받습니다. 닫혀 있는 동안 받은 메시지는 앱을 열면 보입니다.
+- AIDL API v2부터 `send()`는 메시지의 msgId를 돌려주고, 상대가 그 메시지에 답장하면 `onMessage`의 `replyTo`가 그 값입니다. 로그의 `request`가 그 msgId입니다.
+- 이 앱을 설치하면 BLE Communicator 설정 화면의 **연동된 앱**에 나오고, 삭제하면 목록에서 빠집니다.
 - 스크립트용: `adb shell "am start -n com.rouddy.bluetooth_communicator.testapp/.MainActivity --es text '보낼 내용'"`은 연결된 첫 기기로 보냅니다. 결과는 `adb logcat -s TestApp`에 남습니다.

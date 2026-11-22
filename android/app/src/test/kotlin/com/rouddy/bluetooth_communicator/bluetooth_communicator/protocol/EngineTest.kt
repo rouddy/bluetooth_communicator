@@ -321,6 +321,30 @@ class EngineTest {
     }
 
     @Test
+    fun `a msgId taken before sending is the one sent, and a reply to it carries it`() {
+        pair()
+
+        // The AIDL service takes the msgId on a binder thread and returns it to the app
+        // before the engine sends; the peer's reply must carry that id.
+        val taken = a.store.nextMsgId()
+        val request = mutableListOf<Int>()
+        val returned = a.engine.send(b.peerId, "${TEST_APP.packageName}/ask", byteArrayOf(1), 0, 0, TEST_APP, msgId = taken) {
+            request += it
+        }
+        settle()
+        val asked = b.delivered.single()
+        b.engine.send(a.peerId, "${TEST_APP.packageName}/ask", byteArrayOf(2), asked.msgId, 0, TEST_APP) {}
+        settle()
+
+        assertEquals(taken, returned)
+        assertEquals(taken, asked.msgId)
+        assertEquals(listOf(DeliveryStatus.OK), request)
+        assertEquals(taken, a.delivered.single().replyTo)
+        // The engine didn't take another id for it.
+        assertEquals(taken + 1, a.store.nextMsgId())
+    }
+
+    @Test
     fun `a message sent while the peer is away waits for it within the TTL`() {
         pair().drop()
 

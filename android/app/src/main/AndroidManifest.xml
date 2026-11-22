@@ -72,6 +72,17 @@
                 android:resource="@xml/file_paths" />
         </provider>
 
+        <!-- Unregisters uninstalled apps from the AIDL app list (AppRegistry), also
+             while this app isn't running. -->
+        <receiver
+            android:name=".PackageRemovedReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.PACKAGE_FULLY_REMOVED" />
+                <data android:scheme="package" />
+            </intent-filter>
+        </receiver>
+
         <receiver
             android:name=".BluetoothBootReceiver"
             android:enabled="true"

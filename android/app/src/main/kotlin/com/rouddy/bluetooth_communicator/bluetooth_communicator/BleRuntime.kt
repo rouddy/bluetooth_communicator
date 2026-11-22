@@ -72,6 +72,10 @@ object BleRuntime : EngineHost {
     lateinit var registry: AppRegistry
         private set
 
+    /** Whether [init] ran in this process. */
+    val initialized: Boolean
+        get() = ::registry.isInitialized
+
     /** The peers as of the last change, for binder threads (AIDL getPeers). */
     @Volatile
     var peerSnapshot: List<PeerSummary> = emptyList()
@@ -115,12 +119,21 @@ object BleRuntime : EngineHost {
         }
     }
 
-    /** Tells a newly attached Dart side the current sessions, peers, prompts, and transfers. */
+    /**
+     * Tells a newly attached Dart side the current sessions, peers, prompts,
+     * transfers, and registered apps.
+     */
     fun replay() {
         engine.connectedSessions().forEach(::onDartEvent)
         BleEventBus.emit(peersEvent())
         engine.pendingApprovals().forEach(::onDartEvent)
         FileShare.replay()
+        BleEventBus.emit(registry.appsEvent())
+    }
+
+    /** The registered apps, or whether one can receive, changed (main looper). */
+    fun onAppsChanged() {
+        BleEventBus.emit(registry.appsEvent())
     }
 
     override fun writeFrame(linkId: Int, frame: ByteArray) {

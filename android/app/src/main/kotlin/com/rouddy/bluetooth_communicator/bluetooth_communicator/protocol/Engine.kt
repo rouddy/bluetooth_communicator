@@ -1203,7 +1203,9 @@ class ProtocolEngine(
      * Sends [payload] to [path] on [peerId]. [callback] gets an ACK status or a local
      * result ([DeliveryStatus]) exactly once. Returns the msgId, or 0 if it failed
      * right away. [app] is the sending app, checked against the peer's CAPS. A [bulk]
-     * message (a file chunk) goes out after every other kind (9절).
+     * message (a file chunk) goes out after every other kind (9절). [msgId] is one
+     * the caller already took from [PeerStore.nextMsgId] (the AIDL service returns it
+     * to its caller before this runs), or 0 to take one here.
      */
     fun send(
         peerId: PeerId,
@@ -1213,6 +1215,7 @@ class ProtocolEngine(
         ttlMs: Long,
         app: AppIdentity?,
         bulk: Boolean = false,
+        msgId: Long = 0,
         callback: (Int) -> Unit
     ): Long {
         if (path.isEmpty() || path.toByteArray(Charsets.UTF_8).size > Envelope.MAX_PATH_BYTES) {
@@ -1225,7 +1228,8 @@ class ProtocolEngine(
         } else {
             ttlMs.coerceAtMost(MAX_TTL_MS)
         }
-        val msgId = store.nextMsgId()
+        @Suppress("NAME_SHADOWING")
+        val msgId = if (msgId != 0L) msgId else store.nextMsgId()
         // A reply isn't acknowledged (9절).
         val flags = if (replyTo != 0L) Envelope.FLAG_REPLY else Envelope.FLAG_ACK_REQ
         val outgoing = Outgoing(

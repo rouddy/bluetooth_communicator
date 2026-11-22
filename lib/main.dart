@@ -664,6 +664,24 @@ class _SettingsPageState extends State<SettingsPage> {
                 onPressed: controller.clearError,
               ),
             ),
+          // Other apps reach their peers through the AIDL service (Android only).
+          if (defaultTargetPlatform == TargetPlatform.android) ...[
+            const _SectionHeader('연동된 앱'),
+            if (controller.registeredApps.isEmpty)
+              const ListTile(
+                leading: Icon(Icons.apps_outlined),
+                title: Text('이 기기를 사용하는 앱이 없습니다'),
+                subtitle: Text('다른 앱이 연결 기기와 통신하려고 등록하면 여기에 표시됩니다'),
+              )
+            else
+              for (final app in controller.registeredApps)
+                ListTile(
+                  leading: Icon(app.canReceive ? Icons.apps : Icons.apps_outlined),
+                  title: Text(app.label),
+                  subtitle: Text('${app.packageName}\n${app.receiveStatus}'),
+                  isThreeLine: true,
+                ),
+          ],
         ],
       ),
     );
@@ -994,6 +1012,10 @@ class BleAppController extends ChangeNotifier {
   final List<BleDevice> discoveredDevices = <BleDevice>[];
   final List<BleDevice> registeredDevices = <BleDevice>[];
   final Set<String> connectedDeviceIds = <String>{};
+
+  /// The other apps on this phone that use the AIDL service (Android; `apps`
+  /// event). Native code keeps the list and drops uninstalled apps.
+  final List<RegisteredApp> registeredApps = <RegisteredApp>[];
 
   List<BleDevice> get allKnownDevices {
     final map = <String, BleDevice>{};
@@ -1619,6 +1641,12 @@ class BleAppController extends ChangeNotifier {
           }
         }
         break;
+      case 'apps':
+        final apps = (event['apps'] as List?)?.whereType<Map>() ?? const <Map>[];
+        registeredApps
+          ..clear()
+          ..addAll(apps.map((app) => RegisteredApp.fromMap(app.cast<String, dynamic>())));
+        break;
       case 'pairingRequest':
         if (event['deviceId'] case final String id) {
           // The connect timeout doesn't apply while the users decide.
@@ -1790,6 +1818,42 @@ class BleDevice {
       state: PeerState.values.asNameMap()[map['state']],
     );
   }
+}
+
+/// An app that uses the AIDL service (`apps` event; Android only).
+class RegisteredApp {
+  const RegisteredApp({
+    required this.packageName,
+    required this.label,
+    this.listening = false,
+    this.receiveService = false,
+  });
+
+  factory RegisteredApp.fromMap(Map<String, dynamic> map) => RegisteredApp(
+    packageName: map['packageName'] as String? ?? '',
+    label: (map['label'] as String?)?.trim().isNotEmpty == true
+        ? map['label'] as String
+        : map['packageName'] as String? ?? '',
+    listening: map['listening'] == true,
+    receiveService: map['receiveService'] == true,
+  );
+
+  final String packageName;
+  final String label;
+
+  /// It has a listener registered now (the app is running).
+  final bool listening;
+
+  /// It declares a RECEIVE service, so it gets messages while it isn't running.
+  final bool receiveService;
+
+  bool get canReceive => listening || receiveService;
+
+  String get receiveStatus => switch ((listening, receiveService)) {
+    (true, _) => '실행 중 · 메시지 받는 중',
+    (false, true) => '앱이 꺼져 있어도 메시지를 받습니다',
+    (false, false) => '앱을 열면 메시지를 받습니다',
+  };
 }
 
 /// An app-paired peer's state (`peers` event).
