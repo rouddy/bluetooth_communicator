@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		0703C53EDB5F838493A6A30F /* FileTransfersTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63977096BF178F9B2DDEB74E /* FileTransfersTests.swift */; };
 		0AF723598512BD269268A1A1 /* FileMessageTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4FFD4A7C079F0C4EB884A39 /* FileMessageTests.swift */; };
+		12760DAC05AC083B4084294C /* FileShare.swift in Sources */ = {isa = PBXBuildFile; fileRef = 430AD50DDB9F11E081354EAD /* FileShare.swift */; };
 		B15EAE5E752F05FBC0C3672A /* FileTransfer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 80695088FDDCC8A3003B86E7 /* FileTransfer.swift */; };
 		9EDAB77146CCB9770D2F90BA /* Clipboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D6388CE1CDB342C74D40F78 /* Clipboard.swift */; };
 		3AB9133377F63CE4BD647C3E /* IOSPeerStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 91AF0DBA8B3FBEEAF1B46056 /* IOSPeerStore.swift */; };
@@ -59,6 +60,7 @@
 /* Begin PBXFileReference section */
 		63977096BF178F9B2DDEB74E /* FileTransfersTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileTransfersTests.swift; sourceTree = "<group>"; };
 		D4FFD4A7C079F0C4EB884A39 /* FileMessageTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileMessageTests.swift; sourceTree = "<group>"; };
+		430AD50DDB9F11E081354EAD /* FileShare.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileShare.swift; sourceTree = "<group>"; };
 		80695088FDDCC8A3003B86E7 /* FileTransfer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileTransfer.swift; sourceTree = "<group>"; };
 		1D6388CE1CDB342C74D40F78 /* Clipboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Clipboard.swift; sourceTree = "<group>"; };
 		91AF0DBA8B3FBEEAF1B46056 /* IOSPeerStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IOSPeerStore.swift; sourceTree = "<group>"; };
@@ -166,6 +168,7 @@
 		97C146F01CF9000F007C117D /* Runner */ = {
 			isa = PBXGroup;
 			children = (
+				430AD50DDB9F11E081354EAD /* FileShare.swift */,
 				91AF0DBA8B3FBEEAF1B46056 /* IOSPeerStore.swift */,
 				305D078B1B61BABB936C7BA3 /* Protocol */,
 				97C146FA1CF9000F007C117D /* Main.storyboard */,
@@ -342,6 +345,7 @@
 			files = (
 				B15EAE5E752F05FBC0C3672A /* FileTransfer.swift in Sources */,
 				9EDAB77146CCB9770D2F90BA /* Clipboard.swift in Sources */,
+				12760DAC05AC083B4084294C /* FileShare.swift in Sources */,
 				3AB9133377F63CE4BD647C3E /* IOSPeerStore.swift in Sources */,
 				29ED770145C40B4F2CEA8825 /* Engine.swift in Sources */,
 				62C97C7590A311A78F8D99BD /* Crypto.swift in Sources */,

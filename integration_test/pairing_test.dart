@@ -15,11 +15,17 @@
 // - MODE=remove: delete the peer from its page (UNPAIR).
 // - MODE=clipboard: take the peer's clipboard (클립보드 가져오기) and print it; with
 //   EXPECT_CLIP, check it.
+// - MODE=sendFile: send the peer a file of FILE_SIZE bytes (default 100,000) and print
+//   how long it took; the peer's user approves it.
+// - MODE=receiveFile: approve the next file the peer sends, wait until it's received,
+//   print how long that took, and close the export screen.
 // CLIP_TEXT puts that text into this phone's clipboard first, for the peer to take.
 // DEVICE_NAME (iOS) sets the name peers see. The phones must already be paired at the
 // OS level, or the system pairing dialogs need a person. LIVE_MINUTES keeps the app
 // drawing afterwards (a finished test's UI is frozen), to watch it while the other
 // phone drives the next steps.
+
+import 'dart:io';
 
 import 'package:bluetooth_communicator/main.dart' as app;
 import 'package:flutter/material.dart';
@@ -35,6 +41,7 @@ const _deviceName = String.fromEnvironment('DEVICE_NAME');
 const _liveMinutes = int.fromEnvironment('LIVE_MINUTES');
 const _clipText = String.fromEnvironment('CLIP_TEXT');
 const _expectClip = String.fromEnvironment('EXPECT_CLIP');
+const _fileSize = int.fromEnvironment('FILE_SIZE', defaultValue: 100000);
 
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
@@ -67,6 +74,46 @@ void main() {
       if (_expectClip.isNotEmpty) {
         expect(copied, _expectClip);
       }
+      return stayLive(tester);
+    }
+    if (_mode == 'sendFile') {
+      await pumpUntilFound(tester, peer);
+      await tester.tap(peer.first);
+      await tester.pumpAndSettle();
+      await pumpUntilFound(tester, find.text('파일을 골라 상대 기기로 보냅니다. 상대가 승인하면 전송됩니다'));
+      final file = File('${Directory.systemTemp.path}/rbc-test-$_fileSize.bin')
+        ..writeAsBytesSync(List.generate(_fileSize, (i) => i * 7 & 0xFF));
+      final page = tester.widget<app.DeviceControlPage>(find.byType(app.DeviceControlPage));
+      await page.controller.sendFile(page.device.identifier, path: file.path);
+      await pumpUntilFound(tester, find.text('상대 기기의 승인을 기다리는 중…'), timeout: const Duration(seconds: 30));
+      final started = DateTime.now();
+      // The approval, then the transfer itself.
+      await pumpUntilFound(tester, find.byType(LinearProgressIndicator), timeout: const Duration(seconds: 130));
+      final accepted = DateTime.now();
+      await pumpUntilFound(tester, find.textContaining('파일을 보냈습니다'), timeout: const Duration(minutes: 30));
+      final seconds = DateTime.now().difference(accepted).inMilliseconds / 1000;
+      debugPrint('[file] sent $_fileSize bytes in ${seconds}s after approval '
+          '(${(_fileSize / 1024 / seconds).toStringAsFixed(1)} KB/s; approval took '
+          '${accepted.difference(started).inSeconds}s)');
+      return stayLive(tester);
+    }
+    if (_mode == 'receiveFile') {
+      await pumpUntilFound(tester, find.text('파일 받기 요청'), timeout: const Duration(minutes: 5));
+      await tester.tap(find.widgetWithText(FilledButton, '승인'));
+      final started = DateTime.now();
+      await pumpUntilFound(tester, find.text('파일을 받았습니다'), timeout: const Duration(minutes: 30));
+      final seconds = DateTime.now().difference(started).inMilliseconds / 1000;
+      final transfer = tester
+          .widget<app.FileTransferDialog>(find.byType(app.FileTransferDialog))
+          .controller
+          .fileTransfers
+          .values
+          .last;
+      debugPrint('[file] received ${transfer.name} (${transfer.size} bytes) in ${seconds}s '
+          '(${(transfer.size / 1024 / seconds).toStringAsFixed(1)} KB/s) at ${transfer.path}');
+      expect(File(transfer.path!).lengthSync(), transfer.size);
+      await tester.tap(find.text('닫기'));
+      await tester.pumpAndSettle();
       return stayLive(tester);
     }
     if (_mode == 'remove') {

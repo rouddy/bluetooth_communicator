@@ -49,10 +49,14 @@ class _MyAppState extends State<MyApp> {
   StreamSubscription<String>? _errors;
   StreamSubscription<String>? _notices;
   StreamSubscription<PairingRequest>? _pairingPrompts;
+  StreamSubscription<int>? _fileDialogs;
 
   /// Devices whose pairing dialog is open, so a replayed request doesn't open a
   /// second one.
   final Set<String> _openPrompts = <String>{};
+
+  /// Incoming file transfers whose dialog is open.
+  final Set<int> _openFileDialogs = <int>{};
 
   @override
   void initState() {
@@ -63,6 +67,8 @@ class _MyAppState extends State<MyApp> {
     _notices = widget.controller.notices.listen(_showSnackBar);
     // Either phone can be asked to approve a pairing, whatever page is open.
     _pairingPrompts = widget.controller.pairingPrompts.listen(_showPairingDialog);
+    // A peer can offer a file whatever page is open.
+    _fileDialogs = widget.controller.fileDialogs.listen(_showFileDialog);
   }
 
   void _showSnackBar(String message) {
@@ -87,11 +93,25 @@ class _MyAppState extends State<MyApp> {
     _openPrompts.remove(request.deviceId);
   }
 
+  Future<void> _showFileDialog(int id) async {
+    final context = _navigatorKey.currentContext;
+    if (context == null || !_openFileDialogs.add(id)) {
+      return;
+    }
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => FileTransferDialog(controller: widget.controller, id: id),
+    );
+    _openFileDialogs.remove(id);
+  }
+
   @override
   void dispose() {
     _errors?.cancel();
     _notices?.cancel();
     _pairingPrompts?.cancel();
+    _fileDialogs?.cancel();
     super.dispose();
   }
 
@@ -206,6 +226,172 @@ class _PairingDialogState extends State<PairingDialog> {
                 child: const Text('승인'),
               ),
             ],
+    );
+  }
+}
+
+/// A file a peer sends (docs/protocol.md 10절, `/file`): the offer to approve, the
+/// download's progress, then the export screen, where the user saves the file or
+/// sends it to another app. It closes itself when the transfer is gone (declined,
+/// canceled, failed, or dismissed); why it failed shows as a SnackBar.
+class FileTransferDialog extends StatefulWidget {
+  const FileTransferDialog({
+    super.key,
+    required this.controller,
+    required this.id,
+  });
+
+  final BleAppController controller;
+  final int id;
+
+  @override
+  State<FileTransferDialog> createState() => _FileTransferDialogState();
+}
+
+class _FileTransferDialogState extends State<FileTransferDialog> {
+  bool _closing = false;
+  bool _exporting = false;
+
+  /// Saved at least once; said in the dialog, where a SnackBar would be hidden.
+  bool _saved = false;
+
+  BleAppController get controller => widget.controller;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: controller,
+      builder: (context, _) {
+        final transfer = controller.fileTransfers[widget.id];
+        if (transfer == null) {
+          if (!_closing) {
+            _closing = true;
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (mounted) {
+                Navigator.of(context).pop();
+              }
+            });
+          }
+          return const SizedBox.shrink();
+        }
+        return switch (transfer.state) {
+          FileTransferState.completed => _buildReceived(context, transfer),
+          FileTransferState.transferring => _buildProgress(context, transfer),
+          _ => _buildOffer(context, transfer),
+        };
+      },
+    );
+  }
+
+  Widget _summary(BuildContext context, FileTransfer transfer) {
+    return ListTile(
+      contentPadding: EdgeInsets.zero,
+      leading: const Icon(Icons.insert_drive_file_outlined),
+      title: Text(transfer.name, maxLines: 2, overflow: TextOverflow.ellipsis),
+      subtitle: Text(formatBytes(transfer.size)),
+    );
+  }
+
+  Widget _buildOffer(BuildContext context, FileTransfer transfer) {
+    return AlertDialog(
+      title: const Text('파일 받기 요청'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('${controller.displayName(transfer.deviceId)}에서 파일을 보내려고 합니다.'),
+          const SizedBox(height: 8),
+          _summary(context, transfer),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => controller.respondFile(widget.id, false),
+          child: const Text('거절'),
+        ),
+        FilledButton(
+          onPressed: () => controller.respondFile(widget.id, true),
+          child: const Text('승인'),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildProgress(BuildContext context, FileTransfer transfer) {
+    return AlertDialog(
+      title: const Text('파일 받는 중'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _summary(context, transfer),
+          const SizedBox(height: 8),
+          LinearProgressIndicator(value: transfer.progress),
+          const SizedBox(height: 8),
+          Text('${formatBytes(transfer.bytes)} / ${formatBytes(transfer.size)}'),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => controller.cancelFile(widget.id),
+          child: const Text('취소'),
+        ),
+      ],
+    );
+  }
+
+  Future<void> _export(FileExportAction action) async {
+    setState(() => _exporting = true);
+    var done = false;
+    try {
+      done = await controller.exportFile(widget.id, action);
+    } finally {
+      if (mounted) {
+        setState(() {
+          _exporting = false;
+          _saved |= done && action == FileExportAction.save;
+        });
+      }
+    }
+  }
+
+  /// The export screen: save the file, or hand it to another app.
+  Widget _buildReceived(BuildContext context, FileTransfer transfer) {
+    return AlertDialog(
+      title: const Text('파일을 받았습니다'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _summary(context, transfer),
+          const SizedBox(height: 8),
+          const Text('기기에 저장하거나 다른 앱으로 보낼 수 있습니다. 닫은 뒤에는 다시 열 수 없습니다.'),
+          if (_saved) ...[
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Icon(Icons.check_circle, size: 20, color: Theme.of(context).colorScheme.primary),
+                const SizedBox(width: 8),
+                const Expanded(child: Text('파일을 저장했습니다.')),
+              ],
+            ),
+          ],
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: _exporting ? null : () => controller.dismissFile(widget.id),
+          child: const Text('닫기'),
+        ),
+        TextButton(
+          onPressed: _exporting ? null : () => _export(FileExportAction.save),
+          child: const Text('저장'),
+        ),
+        FilledButton(
+          onPressed: _exporting ? null : () => _export(FileExportAction.share),
+          child: const Text('앱으로 보내기'),
+        ),
+      ],
     );
   }
 }
@@ -621,6 +807,40 @@ class DeviceControlPage extends StatelessWidget {
     );
   }
 
+  /// Sends a file the user picks (docs/protocol.md 10절, `/file`).
+  Widget _sendFileTile(bool isConnected) {
+    return ListTile(
+      leading: const Icon(Icons.upload_file),
+      title: const Text('파일 보내기'),
+      subtitle: Text(isConnected ? '파일을 골라 상대 기기로 보냅니다. 상대가 승인하면 전송됩니다' : '연결되면 쓸 수 있습니다'),
+      enabled: isConnected,
+      onTap: () => controller.sendFile(device.identifier),
+    );
+  }
+
+  Widget _outgoingTile(FileTransfer transfer) {
+    return ListTile(
+      leading: const Icon(Icons.insert_drive_file_outlined),
+      title: Text(transfer.name, maxLines: 1, overflow: TextOverflow.ellipsis),
+      subtitle: transfer.state == FileTransferState.transferring
+          ? Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const SizedBox(height: 4),
+                LinearProgressIndicator(value: transfer.progress),
+                const SizedBox(height: 4),
+                Text('${formatBytes(transfer.bytes)} / ${formatBytes(transfer.size)}'),
+              ],
+            )
+          : const Text('상대 기기의 승인을 기다리는 중…'),
+      trailing: IconButton(
+        tooltip: '전송 취소',
+        icon: const Icon(Icons.close),
+        onPressed: () => controller.cancelFile(transfer.id),
+      ),
+    );
+  }
+
   Widget _buildPage(BuildContext context) {
     final isConnected = controller.connectedDeviceIds.contains(device.identifier);
     final peerId = controller.peerFor(device.identifier)?.peerId;
@@ -647,6 +867,8 @@ class DeviceControlPage extends StatelessWidget {
             trailing: _linkButton(),
           ),
           if (peerId != null || isConnected) _clipboardTile(isConnected),
+          if (peerId != null || isConnected) _sendFileTile(isConnected),
+          ...controller.outgoingTransfersTo(device.identifier).map(_outgoingTile),
           if (peerId != null)
             ListTile(
               leading: const Icon(Icons.fingerprint),
@@ -711,6 +933,23 @@ class BleAppController extends ChangeNotifier {
 
   /// Our clipboard requests in progress, by device.
   final Map<String, ClipboardRequestState> clipboardRequests = <String, ClipboardRequestState>{};
+
+  /// File transfers by id: ours until they end, and the peers' until the dialog
+  /// is closed (a received file stays for the export screen until dismissed).
+  final Map<int, FileTransfer> fileTransfers = <int, FileTransfer>{};
+  final StreamController<int> _fileDialogs = StreamController<int>.broadcast();
+
+  /// Transfers this user canceled, declined, or dismissed: updates already on
+  /// their way from native code mustn't bring them back.
+  final Set<int> _closedFileIds = <int>{};
+
+  /// Each incoming transfer that's new to this side, to open its dialog.
+  Stream<int> get fileDialogs => _fileDialogs.stream;
+
+  /// Our transfers to [deviceId] in progress, oldest first.
+  List<FileTransfer> outgoingTransfersTo(String deviceId) => fileTransfers.values
+      .where((transfer) => transfer.outgoing && transfer.deviceId == deviceId)
+      .toList();
 
   /// Whether this platform lets the user name the device ([deviceName]).
   static bool get canSetDeviceName => defaultTargetPlatform == TargetPlatform.iOS;
@@ -980,6 +1219,145 @@ class BleAppController extends ChangeNotifier {
     _ => '$name의 클립보드를 가져오지 못했습니다.',
   };
 
+  /// Lets the user pick a file and offers it to [deviceId]; its user has to
+  /// approve it (`fileTransfer` events follow). [path] skips the picker (tests).
+  Future<void> sendFile(String deviceId, {String? path}) async {
+    try {
+      await _methodChannel.invokeMethod<bool>('sendFile', {'deviceId': deviceId, 'path': ?path});
+    } on PlatformException catch (error) {
+      _reportError(switch (error.code) {
+        'READ_FAILED' => '파일을 열지 못했습니다.',
+        'NOT_PAIRED' => '${_displayName(deviceId)}와(과) 연결된 적이 없습니다.',
+        'BUSY' => '파일 선택 화면이 이미 열려 있습니다.',
+        _ => '파일을 보내지 못했습니다: ${error.message ?? error.code}',
+      });
+      notifyListeners();
+    } on MissingPluginException {
+      _reportError('Native Bluetooth channel unavailable (sendFile)');
+      notifyListeners();
+    }
+  }
+
+  /// Answers a peer's file offer; an accepted file downloads, then the dialog
+  /// offers to save or share it.
+  Future<void> respondFile(int id, bool accept) async {
+    final transfer = fileTransfers[id];
+    if (transfer == null || transfer.state != FileTransferState.offered) {
+      return;
+    }
+    if (!accept) {
+      fileTransfers.remove(id);
+      _closedFileIds.add(id);
+      notifyListeners();
+    }
+    await _invoke('respondFile', {'id': id, 'accept': accept});
+  }
+
+  /// Stops a transfer in either direction; the peer is told.
+  Future<void> cancelFile(int id) async {
+    final transfer = fileTransfers.remove(id);
+    if (transfer == null) {
+      return;
+    }
+    _closedFileIds.add(id);
+    notifyListeners();
+    await _invoke('cancelFile', {'id': id});
+  }
+
+  /// Closes a received file's export screen; native code forgets it.
+  Future<void> dismissFile(int id) async {
+    if (fileTransfers.remove(id) == null) {
+      return;
+    }
+    _closedFileIds.add(id);
+    notifyListeners();
+    await _invoke('dismissFile', {'id': id});
+  }
+
+  /// Saves the received file [id] where the user picks, or sends it to an app.
+  /// Returns whether it was saved (false if the user closed the picker), or
+  /// whether the share sheet opened.
+  Future<bool> exportFile(int id, FileExportAction action) async {
+    try {
+      return await _methodChannel.invokeMethod<bool>('exportFile', {'id': id, 'action': action.name}) ?? false;
+    } on PlatformException catch (error) {
+      _reportError(switch (error.code) {
+        'NOT_FOUND' => '받은 파일이 더 이상 없습니다.',
+        'BUSY' => '파일 선택 화면이 이미 열려 있습니다.',
+        _ => action == FileExportAction.save ? '파일을 저장하지 못했습니다.' : '파일을 다른 앱으로 보내지 못했습니다.',
+      });
+      notifyListeners();
+    } on MissingPluginException {
+      _reportError('Native Bluetooth channel unavailable (exportFile)');
+      notifyListeners();
+    }
+    return false;
+  }
+
+  void _onFileTransfer(FileTransfer transfer) {
+    if (_closedFileIds.contains(transfer.id)) {
+      // The user's own cancel or decline ending it needs no message.
+      if (transfer.finished) {
+        _closedFileIds.remove(transfer.id);
+      }
+      return;
+    }
+    final previous = fileTransfers[transfer.id];
+    final keep = !transfer.finished || (!transfer.outgoing && transfer.state == FileTransferState.completed);
+    if (keep) {
+      fileTransfers[transfer.id] = transfer;
+    } else {
+      fileTransfers.remove(transfer.id);
+    }
+    if (!transfer.outgoing && keep && previous == null) {
+      _fileDialogs.add(transfer.id);
+    }
+    if (!transfer.finished) {
+      return;
+    }
+    final name = _displayName(transfer.deviceId);
+    if (transfer.outgoing && transfer.state == FileTransferState.completed) {
+      _notices.add('$name에 파일을 보냈습니다: ${transfer.name}');
+      return;
+    }
+    final message = transfer.outgoing
+        ? _sendFailure(name, transfer)
+        : _receiveFailure(name, transfer, wasOffered: previous?.state == FileTransferState.offered);
+    if (message != null) {
+      _reportError(message);
+    }
+  }
+
+  /// Why our file didn't go through; null when this user canceled it.
+  static String? _sendFailure(String name, FileTransfer transfer) => switch (transfer.state) {
+    FileTransferState.declined => '$name에서 파일을 거절했습니다.',
+    FileTransferState.canceled => transfer.byPeer ? '$name에서 파일 받기를 취소했습니다.' : null,
+    _ => switch (transfer.reason) {
+      'timeout' => '$name에서 응답이 없어 파일을 보내지 못했습니다.',
+      'unsupported' => '$name의 앱이 파일 받기를 지원하지 않습니다. 앱을 업데이트해 주세요.',
+      'notConnected' => '$name와(과) 연결되어 있지 않아 파일을 보내지 못했습니다.',
+      'linkLost' => '$name와(과)의 연결이 끊어져 파일을 보내지 못했습니다.',
+      'read' => '파일을 읽지 못했습니다: ${transfer.name}',
+      'peer' => '$name에서 파일을 저장하지 못했습니다.',
+      'busy' => '$name에 대기 중인 파일 요청이 너무 많습니다.',
+      _ => '$name에 파일을 보내지 못했습니다.',
+    },
+  };
+
+  /// Why a peer's file didn't arrive; null when this user declined or canceled.
+  static String? _receiveFailure(String name, FileTransfer transfer, {required bool wasOffered}) =>
+      switch (transfer.state) {
+        FileTransferState.declined => null,
+        FileTransferState.canceled => transfer.byPeer ? '$name에서 파일 보내기를 취소했습니다.' : null,
+        _ => switch (transfer.reason) {
+          'timeout' when wasOffered => '$name의 파일 받기 요청이 시간이 지나 거절되었습니다.',
+          'timeout' => '$name에서 파일이 더 오지 않아 받기를 멈췄습니다.',
+          'storage' => '받은 파일을 저장하지 못했습니다. 저장 공간을 확인해 주세요.',
+          'notConnected' || 'linkLost' => '$name와(과)의 연결이 끊어져 파일을 받지 못했습니다.',
+          _ => '$name에서 파일을 받지 못했습니다.',
+        },
+      };
+
   Future<void> setDeviceName(String name) async {
     deviceName = name.trim();
     await _prefs?.setString(_prefsDeviceName, deviceName);
@@ -1155,6 +1533,9 @@ class BleAppController extends ChangeNotifier {
     }
   }
 
+  /// The name to show for [deviceId]: the peer's, or the ID.
+  String displayName(String deviceId) => _displayName(deviceId);
+
   String _displayName(String deviceId, [String? name]) {
     final known = (name == null || name.isEmpty) ? _deviceById(deviceId).name : name;
     return known.isEmpty ? deviceId : known;
@@ -1325,6 +1706,11 @@ class BleAppController extends ChangeNotifier {
           unawaited(_onClipboard(id, event));
         }
         break;
+      case 'fileTransfer':
+        if (event['id'] is int && event['deviceId'] is String) {
+          _onFileTransfer(FileTransfer.fromEvent(event));
+        }
+        break;
       case 'clipboardShared':
         if (event['deviceId'] case final String id) {
           _notices.add('${_displayName(id)}에 클립보드를 보냈습니다.');
@@ -1371,6 +1757,7 @@ class BleAppController extends ChangeNotifier {
     _errors.close();
     _notices.close();
     _pairingPrompts.close();
+    _fileDialogs.close();
     for (final timer in _connectTimeouts.values) {
       timer.cancel();
     }
@@ -1477,6 +1864,108 @@ class BleStatus {
     ];
     return parts.isEmpty ? 'idle' : parts.join(' ');
   }
+}
+
+/// Where a file transfer is (`fileTransfer.state`).
+enum FileTransferState {
+  /// A peer offered it; waiting for this user.
+  offered,
+
+  /// We offered it; waiting for the peer's user.
+  waiting,
+  transferring,
+  completed,
+  declined,
+  canceled,
+  failed,
+}
+
+/// A `fileTransfer` event: one file to or from a peer (docs/protocol.md 10절).
+class FileTransfer {
+  const FileTransfer({
+    required this.id,
+    required this.deviceId,
+    required this.outgoing,
+    required this.name,
+    required this.size,
+    required this.mime,
+    required this.state,
+    this.bytes = 0,
+    this.byPeer = false,
+    this.reason,
+    this.status,
+    this.path,
+  });
+
+  factory FileTransfer.fromEvent(Map<String, dynamic> event) => FileTransfer(
+    id: event['id'] as int,
+    deviceId: event['deviceId'] as String,
+    outgoing: event['direction'] == 'send',
+    name: event['name'] as String? ?? '',
+    size: event['size'] as int? ?? 0,
+    mime: event['mime'] as String? ?? '',
+    state: FileTransferState.values.asNameMap()[event['state']] ?? FileTransferState.failed,
+    bytes: event['bytes'] as int? ?? 0,
+    byPeer: event['byPeer'] == true,
+    reason: event['reason'] as String?,
+    status: event['status'] as int?,
+    path: event['path'] as String?,
+  );
+
+  /// Local to this phone; what the `*File` methods take.
+  final int id;
+  final String deviceId;
+
+  /// Whether this phone sends it.
+  final bool outgoing;
+  final String name;
+  final int size;
+  final String mime;
+  final FileTransferState state;
+
+  /// Sent and confirmed, or received and written.
+  final int bytes;
+
+  /// Declined or canceled by the peer's user, not this one.
+  final bool byPeer;
+
+  /// Why it failed: `timeout`, `unsupported`, `notConnected`, `linkLost`,
+  /// `storage`, `read`, `peer`, `busy`, or `unpaired`.
+  final String? reason;
+  final int? status;
+
+  /// Where a received file is, once completed.
+  final String? path;
+
+  bool get finished => state.index >= FileTransferState.completed.index;
+
+  /// 0–1, or null when there's nothing to measure (an empty file).
+  double? get progress => size > 0 ? (bytes / size).clamp(0.0, 1.0) : null;
+}
+
+/// What the export screen does with a received file (`exportFile.action`).
+enum FileExportAction {
+  /// Into a folder the user picks (Android's document picker, iOS Files).
+  save,
+
+  /// To another app, through the share sheet.
+  share,
+}
+
+/// e.g. `512 B`, `16.4 KB`, `3.6 MB`. Decimal units, like the sizes Android and
+/// iOS show (in the notifications, for one).
+String formatBytes(int bytes) {
+  const units = ['KB', 'MB', 'GB'];
+  if (bytes < 1000) {
+    return '$bytes B';
+  }
+  var value = bytes / 1000;
+  var unit = 0;
+  while (value >= 1000 && unit < units.length - 1) {
+    value /= 1000;
+    unit++;
+  }
+  return '${value.toStringAsFixed(1)} ${units[unit]}';
 }
 
 enum ClipboardRequestState {

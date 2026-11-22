@@ -529,6 +529,7 @@ class BluetoothBackgroundService : Service(), BleTransport {
         }
         var remaining = peers.size
         peers.forEach { peer ->
+            FileShare.transfers.peerRemoved(peer.peerId)
             engine.removePeer(peer.peerId) {
                 remaining--
                 if (remaining == 0) {

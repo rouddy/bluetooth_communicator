@@ -21,6 +21,7 @@ import com.rouddy.bluetooth_communicator.bluetooth_communicator.protocol.Deliver
 import com.rouddy.bluetooth_communicator.bluetooth_communicator.protocol.EngineEvent
 import com.rouddy.bluetooth_communicator.bluetooth_communicator.protocol.EngineHost
 import com.rouddy.bluetooth_communicator.bluetooth_communicator.protocol.Envelope
+import com.rouddy.bluetooth_communicator.bluetooth_communicator.protocol.FileMessage
 import com.rouddy.bluetooth_communicator.bluetooth_communicator.protocol.LocalIdentity
 import com.rouddy.bluetooth_communicator.bluetooth_communicator.protocol.PeerId
 import com.rouddy.bluetooth_communicator.bluetooth_communicator.protocol.PeerState
@@ -99,6 +100,7 @@ object BleRuntime : EngineHost {
         registry = AppRegistry(this.context)
         router = registry
         ClipboardShare.init(this.context)
+        FileShare.init(this.context, engine, scheduler)
         this.context.getSystemService(NotificationManager::class.java).createNotificationChannel(
             NotificationChannel(PAIRING_CHANNEL_ID, "기기 연결 요청", NotificationManager.IMPORTANCE_HIGH)
         )
@@ -113,11 +115,12 @@ object BleRuntime : EngineHost {
         }
     }
 
-    /** Tells a newly attached Dart side the current sessions, peers, and prompts. */
+    /** Tells a newly attached Dart side the current sessions, peers, prompts, and transfers. */
     fun replay() {
         engine.connectedSessions().forEach(::onDartEvent)
         BleEventBus.emit(peersEvent())
         engine.pendingApprovals().forEach(::onDartEvent)
+        FileShare.replay()
     }
 
     override fun writeFrame(linkId: Int, frame: ByteArray) {
@@ -145,7 +148,7 @@ object BleRuntime : EngineHost {
     }
 
     override fun localCaps(): Capabilities =
-        Capabilities(listOf(ClipboardMessage.PATH), router?.localCaps()?.apps ?: emptyList())
+        Capabilities(listOf(ClipboardMessage.PATH, FileMessage.PATH), router?.localCaps()?.apps ?: emptyList())
 
     override fun deliver(peerId: PeerId, data: Envelope.Data, done: (Int) -> Unit) {
         val target = router
@@ -155,6 +158,11 @@ object BleRuntime : EngineHost {
                 done(DeliveryStatus.OK)
             }
             data.path == ClipboardMessage.PATH -> ClipboardShare.onRequest(peerId, data, done)
+            data.path == FileMessage.PATH && data.isReply -> {
+                FileShare.transfers.onReply(peerId, data)
+                done(DeliveryStatus.OK)
+            }
+            data.path == FileMessage.PATH -> FileShare.transfers.onRequest(peerId, data, done)
             // No other built-in paths yet (/control/media is a later step).
             data.path.startsWith("/") -> done(DeliveryStatus.UNSUPPORTED)
             target == null -> done(DeliveryStatus.NO_RECEIVER)
@@ -172,6 +180,7 @@ object BleRuntime : EngineHost {
         when (event) {
             is EngineEvent.PairingRequest -> notifyPairing(event)
             is EngineEvent.PairingResult -> cancelPairingNotification(event.deviceId)
+            is EngineEvent.PeerUnpaired -> FileShare.transfers.peerRemoved(event.peerId)
             else -> Unit
         }
         transport?.onEngineEvent(event)

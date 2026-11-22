@@ -2,6 +2,7 @@ package com.rouddy.bluetooth_communicator.bluetooth_communicator
 
 import android.Manifest
 import android.app.NotificationManager
+import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.PackageManager
 import androidx.core.content.ContextCompat
@@ -13,6 +14,10 @@ import io.flutter.plugin.common.MethodChannel
 class MainActivity : FlutterActivity() {
     private val methodChannelName = "com.rouddy.bluetooth_communicator/bluetooth_control"
     private val eventChannelName = "com.rouddy.bluetooth_communicator/bluetooth_events"
+
+    // File pickers in flight: the device to send to, or the received file to save.
+    private var pendingPick: Pair<String, MethodChannel.Result>? = null
+    private var pendingSave: Pair<String, MethodChannel.Result>? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -86,6 +91,22 @@ class MainActivity : FlutterActivity() {
                         ClipboardShare.sharingEnabled = call.argument<Boolean>("enabled") != false
                         result.success(null)
                     }
+                    "sendFile" -> sendFile(call.argument("deviceId"), call.argument("path"), result)
+                    "respondFile" -> {
+                        val id = call.argument<Number>("id")?.toLong()
+                        val accept = call.argument<Boolean>("accept") == true
+                        id?.let { BleRuntime.post { FileShare.transfers.respond(it, accept) } }
+                        result.success(null)
+                    }
+                    "cancelFile" -> {
+                        call.argument<Number>("id")?.toLong()?.let { BleRuntime.post { FileShare.transfers.cancel(it) } }
+                        result.success(null)
+                    }
+                    "dismissFile" -> {
+                        call.argument<Number>("id")?.toLong()?.let { BleRuntime.post { FileShare.transfers.dismiss(it) } }
+                        result.success(null)
+                    }
+                    "exportFile" -> exportFile(call.argument<Number>("id")?.toLong(), call.argument("action"), result)
                     "respondPairing" -> {
                         val started = startServiceAction(
                             BluetoothBackgroundService.ACTION_RESPOND_PAIRING,
@@ -117,12 +138,112 @@ class MainActivity : FlutterActivity() {
     override fun onResume() {
         super.onResume()
         BleEventBus.appInForeground = true
-        // Pairing prompts show in the app now (replayed on attach); clear their
-        // notifications.
+        // Pairing prompts and file transfers show in the app now (replayed on
+        // attach); clear their notifications.
         val manager = getSystemService(NotificationManager::class.java)
         manager.activeNotifications
             .filter { it.notification.channelId == BleRuntime.PAIRING_CHANNEL_ID }
             .forEach { manager.cancel(it.tag, it.id) }
+        FileShare.clearNotifications()
+    }
+
+    /**
+     * Offers a file to [deviceId]: the one at [path] (tests), or one the user picks.
+     * Answers true once offered, false if the picker was closed.
+     */
+    private fun sendFile(deviceId: String?, path: String?, result: MethodChannel.Result) {
+        val offered = { error: String? ->
+            if (error == null) {
+                result.success(true)
+            } else {
+                result.error(error, "Can't send the file", null)
+            }
+        }
+        when {
+            deviceId == null -> result.error("BAD_ARGS", "deviceId is required", null)
+            path != null -> FileShare.offerPath(deviceId, path, offered)
+            pendingPick != null || pendingSave != null -> result.error("BUSY", "A file picker is already open", null)
+            else -> {
+                val intent = Intent(Intent.ACTION_OPEN_DOCUMENT)
+                    .addCategory(Intent.CATEGORY_OPENABLE)
+                    .setType("*/*")
+                if (startForResult(intent, REQUEST_PICK_FILE, result)) {
+                    pendingPick = deviceId to result
+                }
+            }
+        }
+    }
+
+    /** Saves ([action] `save`) or shares (`share`) the received file [id]. */
+    private fun exportFile(id: Long?, action: String?, result: MethodChannel.Result) {
+        val transfer = id?.let(FileShare::receivedFile)
+        when {
+            transfer == null -> result.error("NOT_FOUND", "No received file $id", null)
+            action == "share" -> try {
+                startActivity(FileShare.shareIntent(transfer))
+                result.success(true)
+            } catch (e: Exception) {
+                result.error("EXPORT_FAILED", e.message, null)
+            }
+            action != "save" -> result.error("BAD_ARGS", "Unknown action $action", null)
+            pendingPick != null || pendingSave != null -> result.error("BUSY", "A file picker is already open", null)
+            else -> {
+                // The user picks where; Downloads, Drive, and so on.
+                val intent = Intent(Intent.ACTION_CREATE_DOCUMENT)
+                    .addCategory(Intent.CATEGORY_OPENABLE)
+                    .setType(transfer.mime)
+                    .putExtra(Intent.EXTRA_TITLE, transfer.name)
+                if (startForResult(intent, REQUEST_SAVE_FILE, result)) {
+                    pendingSave = transfer.path!! to result
+                }
+            }
+        }
+    }
+
+    private fun startForResult(intent: Intent, requestCode: Int, result: MethodChannel.Result): Boolean = try {
+        startActivityForResult(intent, requestCode)
+        true
+    } catch (e: ActivityNotFoundException) {
+        result.error("NO_PICKER", e.message, null)
+        false
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        val uri = data?.data.takeIf { resultCode == RESULT_OK }
+        when (requestCode) {
+            REQUEST_PICK_FILE -> {
+                val (deviceId, result) = pendingPick ?: return
+                pendingPick = null
+                if (uri == null) {
+                    result.success(false)
+                    return
+                }
+                FileShare.offerUri(deviceId, uri) { error ->
+                    if (error == null) {
+                        result.success(true)
+                    } else {
+                        result.error(error, "Can't send the file", null)
+                    }
+                }
+            }
+            REQUEST_SAVE_FILE -> {
+                val (path, result) = pendingSave ?: return
+                pendingSave = null
+                if (uri == null) {
+                    result.success(false)
+                    return
+                }
+                FileShare.copyTo(path, uri) { copied ->
+                    if (copied) {
+                        result.success(true)
+                    } else {
+                        result.error("EXPORT_FAILED", "Can't save the file", null)
+                    }
+                }
+            }
+            else -> super.onActivityResult(requestCode, resultCode, data)
+        }
     }
 
     // Clipboard requests that arrived while the app wasn't on screen wait for this
@@ -145,6 +266,11 @@ class MainActivity : FlutterActivity() {
     override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
         BleEventBus.detach()
         super.cleanUpFlutterEngine(flutterEngine)
+    }
+
+    private companion object {
+        const val REQUEST_PICK_FILE = 4101
+        const val REQUEST_SAVE_FILE = 4102
     }
 
     // Notification permission is deliberately not required: the foreground service runs
