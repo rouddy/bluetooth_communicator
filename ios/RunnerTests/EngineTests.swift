@@ -168,6 +168,21 @@ final class EngineTests: XCTestCase {
     }
   }
 
+  func testABulkMessageLetsOtherMessagesGoFirst() {
+    pair()
+
+    var results: [Int] = []
+    a.engine.send(
+      peerId: b.peerId, path: "\(testApp.packageName)/bulk", payload: Data(count: 2_000), replyTo: 0, ttlMs: 0, app: testApp,
+      bulk: true
+    ) { results.append($0) }
+    _ = a.send(to: b, Data("quick".utf8))
+    settle()
+
+    XCTAssertEqual(b.delivered.map(\.path), ["\(testApp.packageName)/chat", "\(testApp.packageName)/bulk"])
+    XCTAssertEqual(results, [DeliveryStatus.ok])
+  }
+
   func testAReplyReachesThePeerEvenIfItsCapsDontListThePath() {
     // A asks for B's clipboard but doesn't offer its own.
     a.caps = Capabilities(builtins: [], apps: [testApp])

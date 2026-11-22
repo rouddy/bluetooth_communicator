@@ -101,6 +101,18 @@ final class VectorsTests: XCTestCase {
       ("clipboardReply", .data(DataEnvelope(
         msgId: 13, flags: Envelope.flagReply, path: ClipboardMessage.path, replyTo: 12,
         payload: ClipboardMessage.replyWithText("복사한 텍스트")))),
+      ("fileOffer", .data(DataEnvelope(
+        msgId: 20, flags: Envelope.flagAckReq, path: FileMessage.path, replyTo: 0,
+        payload: FileMessage.offer(size: 40_000, name: "사진.jpg", mime: "image/jpeg")))),
+      ("fileReply", .data(DataEnvelope(
+        msgId: 21, flags: Envelope.flagReply, path: FileMessage.path, replyTo: 20,
+        payload: FileMessage.reply(FileMessage.accepted)))),
+      ("fileChunk", .data(DataEnvelope(
+        msgId: 22, flags: Envelope.flagAckReq, path: FileMessage.path, replyTo: 0,
+        payload: FileMessage.chunk(transferId: 20, offset: 16_384, data: Data([1, 2, 3, 4]))))),
+      ("fileCancel", .data(DataEnvelope(
+        msgId: 23, flags: Envelope.flagAckReq, path: FileMessage.path, replyTo: 0,
+        payload: FileMessage.cancel(transferId: 20)))),
     ]
     for (name, envelope) in cases {
       XCTAssertEqual(Envelope.encode(envelope), hex(envelopes, name), name)

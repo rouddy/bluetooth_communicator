@@ -177,7 +177,10 @@ class ProtocolEngine(
         const val PRIORITY_ACK = 1
         const val PRIORITY_CONTROL = 2
         const val PRIORITY_DATA = 3
-        private const val PRIORITY_COUNT = 4
+
+        /** File chunks (`/file`): below everything else, so they don't hold it up. */
+        const val PRIORITY_BULK = 4
+        private const val PRIORITY_COUNT = 5
 
         const val HANDSHAKE_TIMEOUT_MS = 10_000L
         const val APPROVAL_TIMEOUT_MS = 60_000L
@@ -1199,7 +1202,8 @@ class ProtocolEngine(
     /**
      * Sends [payload] to [path] on [peerId]. [callback] gets an ACK status or a local
      * result ([DeliveryStatus]) exactly once. Returns the msgId, or 0 if it failed
-     * right away. [app] is the sending app, checked against the peer's CAPS.
+     * right away. [app] is the sending app, checked against the peer's CAPS. A [bulk]
+     * message (a file chunk) goes out after every other kind (9절).
      */
     fun send(
         peerId: PeerId,
@@ -1208,6 +1212,7 @@ class ProtocolEngine(
         replyTo: Long,
         ttlMs: Long,
         app: AppIdentity?,
+        bulk: Boolean = false,
         callback: (Int) -> Unit
     ): Long {
         if (path.isEmpty() || path.toByteArray(Charsets.UTF_8).size > Envelope.MAX_PATH_BYTES) {
@@ -1226,7 +1231,11 @@ class ProtocolEngine(
         val outgoing = Outgoing(
             msgId,
             Envelope.Data(msgId, flags, path, replyTo, payload),
-            if (control) PRIORITY_CONTROL else PRIORITY_DATA,
+            when {
+                control -> PRIORITY_CONTROL
+                bulk -> PRIORITY_BULK
+                else -> PRIORITY_DATA
+            },
             app,
             callback
         )

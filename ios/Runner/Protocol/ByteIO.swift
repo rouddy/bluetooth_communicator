@@ -30,6 +30,12 @@ struct ByteWriter {
     }
   }
 
+  /// u64; sizes and offsets, which never reach 2^63.
+  mutating func u64(_ value: UInt64) {
+    u32(UInt32(truncatingIfNeeded: value))
+    u32(UInt32(truncatingIfNeeded: value >> 32))
+  }
+
   mutating func append(_ data: Data) {
     buffer.append(contentsOf: data)
   }
@@ -63,6 +69,11 @@ struct ByteReader {
       value |= UInt32(try u8()) << UInt32(shift)
     }
     return value
+  }
+
+  mutating func u64() throws -> UInt64 {
+    let low = UInt64(try u32())
+    return low | (UInt64(try u32()) << 32)
   }
 
   mutating func take(_ count: Int) throws -> Data {

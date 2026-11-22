@@ -1,6 +1,6 @@
 # BLE 메시지 프로토콜 v1
 
-> 상태: **Android와 iOS에 구현했습니다**(14절의 1–5단계, Android는 7단계도). 6단계(`/control/media`)는 아직입니다. 관련 TODO: 23번.
+> 상태: **Android와 iOS에 구현했습니다**(14절의 1–5단계, Android는 7단계도). 내장 기능 `/clipboard`와 `/file`(10절)도 두 플랫폼에 있습니다. 6단계(`/control/media`)는 아직입니다. 관련 TODO: 23번.
 > 구현하면서 기기에서 확인한 내용을 반영해 원래 설계에서 바뀐 곳이 있습니다. 4절(조각 최대 512바이트), 9절(연결된 링크가 살아 있는지 확인), 10절(`/ping`), 12절(확정된 채널 계약)입니다.
 
 ## 1. 목표와 범위
@@ -12,7 +12,7 @@
 
 범위에서 뺀 것
 - **Wi-Fi 테더링**: 일반 앱은 켜고 끌 수 없습니다. `TetheringManager`는 시스템 API이고 `TETHER_PRIVILEGED`가 필요합니다. 일반 앱이 쓸 수 있는 `startLocalOnlyHotspot`은 인터넷을 공유하지 않습니다. iOS도 개인용 핫스팟을 앱에서 제어할 수 없습니다.
-- **대용량 전송**: GATT 처리량은 초당 수 KB에서 수십 KB 정도입니다. 파일 전송이 필요해지면 L2CAP CoC(Android 10+, iOS 11+)로 Frame 계층만 바꿉니다.
+- **대용량 전송**: GATT 처리량은 초당 수 KB에서 수십 KB 정도입니다. 파일은 `/file`(10절)로 보낼 수 있지만 큰 파일은 오래 걸립니다. 더 빨라야 하면 L2CAP CoC(Android 10+, iOS 11+)로 Frame 계층만 바꿉니다.
 - **iOS의 앱 간 통신**: iOS에는 AIDL에 해당하는 수단이 없습니다. iOS는 원격 조작을 하는 쪽과 `/debug/chat`만 지원합니다.
 - **오래 보관했다가 전달(store-and-forward)**: v1의 TTL은 최대 60초입니다.
 
@@ -289,7 +289,7 @@ ACK는 "도착했다"는 뜻입니다. 실행 결과는 따로 `REPLY` DATA로 �
 ## 8. Path와 라우팅
 
 - path는 UTF-8로 255바이트 이하입니다.
-- `/`로 시작하는 path는 이 앱의 내장 기능입니다. 지금 정의된 것은 `/ping`, `/clipboard`, `/control/media`(아직 구현 안 함)입니다.
+- `/`로 시작하는 path는 이 앱의 내장 기능입니다. 지금 정의된 것은 `/ping`, `/clipboard`, `/file`, `/control/media`(아직 구현 안 함)입니다.
 - 그 밖의 path는 `<packageName>/<임의 문자열>`입니다. 첫 `/` 앞이 패키지명입니다.
 - **앱 식별자**는 (패키지명, 서명 인증서 SHA-256)입니다. 패키지명만으로 판단하면, 서명이 다른 같은 이름의 앱을 사이드로드해서 데이터를 받을 수 있습니다.
 
@@ -305,7 +305,7 @@ ACK는 "도착했다"는 뜻입니다. 실행 결과는 따로 `REPLY` DATA로 �
 ## 9. 전달 규칙
 
 - **msgId**: u32입니다. 보내는 쪽이 모든 peer에 걸쳐 1씩 늘리고 저장해서, 프로세스가 재시작돼도 이어집니다. 1부터 시작하고, 0은 "없음"입니다.
-- **ACK_REQ**: `/debug/chat`, `/control` 요청, 앱 DATA, UNPAIR에는 붙입니다. `REPLY`에는 붙이지 않습니다.
+- **ACK_REQ**: `/debug/chat`, `/control` 요청, 내장 기능의 요청(`/clipboard`, `/file`), 앱 DATA, UNPAIR에는 붙입니다. `REPLY`에는 붙이지 않습니다.
 - **중복 제거**: 받는 쪽은 peer별로 최근 2분 동안 받은 `ACK_REQ` DATA의 (msgId → status)를 기억합니다. 같은 msgId가 다시 오면 대상에 다시 넘기지 않고, 기억해 둔 status로 ACK만 다시 보냅니다.
 - **재전송**: 한 링크 안에서는 GATT가 순서와 전달을 보장하므로 재전송하지 않습니다. ACK를 받기 전에 세션이 끊기면, 다시 연결된 세션으로 같은 msgId를 원래 순서대로 다시 보냅니다.
 - **TTL**: 보내는 쪽이 메시지마다 정합니다. 기본값은 `/control` 10초, 그 밖에는 30초이고, 최대 60초입니다. TTL은 상대에게 보내지 않습니다(두 폰의 시계가 다름). 기다리는 동안 peer가 연결되지 않아도 TTL까지는 기다립니다.
@@ -313,7 +313,7 @@ ACK는 "도착했다"는 뜻입니다. 실행 결과는 따로 `REPLY` DATA로 �
 - **보낸 쪽이 받는 결과**: ACK status(0–255) 또는 로컬 결과입니다. 로컬 결과는 두 가지입니다.
   - `EXPIRED_NOT_SENT`(1000): 보내지 못함. 다시 시도해도 안전합니다
   - `EXPIRED_UNCONFIRMED`(1001): 보냈지만 ACK를 받지 못함. 상대가 받았을 수도 있습니다
-- **순서**: peer별로 보낸 순서대로 나갑니다. 우선순위는 핸드셰이크 > ACK > `/control` > 그 밖의 DATA 순이고, 우선순위가 높은 record는 낮은 record의 조각 사이에 끼어들 수 있습니다. 같은 우선순위 안에서는 순서를 지킵니다.
+- **순서**: peer별로 보낸 순서대로 나갑니다. 우선순위는 핸드셰이크 > ACK > `/control` > 그 밖의 DATA > 파일 조각(`/file`의 CHUNK, 10절) 순이고, 우선순위가 높은 record는 낮은 record의 조각 사이에 끼어들 수 있습니다. 같은 우선순위 안에서는 순서를 지킵니다. 그래서 파일을 보내는 중에도 다른 메시지가 파일 뒤에서 기다리지 않습니다.
 - **흐름 제어**: peer별로 ACK를 기다리는 DATA는 최대 4개입니다. AIDL 앱별 대기열은 32개이고, 넘으면 로컬에서 `BUSY`입니다.
 - **전달 의미**: 보통은 한 번 전달됩니다. 다만 받는 쪽 프로세스가 재시작돼 중복 기록이 사라진 사이에 재전송이 오면 두 번 전달될 수 있습니다(at-least-once). 그래서 원격 조작은 TOGGLE보다 PLAY와 PAUSE처럼 여러 번 실행해도 결과가 같은 op를 쓰고, 앱은 (peerId, msgId)로 중복을 거릅니다.
 
@@ -363,6 +363,55 @@ ACK는 "도착했다"는 뜻입니다. 실행 결과는 따로 `REPLY` DATA로 �
 - 요청한 쪽은 마지막 답을 60초까지 기다리고, `OK`면 받은 텍스트를 자기 클립보드에 넣습니다.
 - 두 플랫폼 모두 CAPS에 `/clipboard`를 넣습니다. 앱 설정에서 공유를 꺼도 CAPS에는 남기고 `DENIED`로 답합니다. 그래야 요청한 쪽이 "지원하지 않음"과 "허용하지 않음"을 구분합니다.
 - `REPLY`는 상대가 보낸 요청에 대한 답이므로, 보낼 때 상대 CAPS를 확인하지 않습니다(8절의 보내는 쪽 확인은 요청에만 적용).
+
+### `/file`
+
+연결된 기기에 파일 하나를 보냅니다. 받는 쪽 사용자가 승인해야 전송이 시작됩니다.
+
+- 보내는 쪽의 요청은 모두 `ACK_REQ`를 붙인 DATA이고, payload는 `u8 op`로 시작합니다. 모르는 op에는 ACK `UNSUPPORTED`, 형식이 틀리면 `MALFORMED`로 답합니다.
+
+  | op | 이름 | 뒤따르는 내용 |
+  |---|---|---|
+  | 0 | OFFER | `u64 size`, `u8 nameLen`, name(UTF-8, 1–255바이트), `u8 mimeLen`, mime(0–255바이트, 비면 모름) |
+  | 1 | CHUNK | `u32 transferId`, `u64 offset`, 데이터(나머지 전부, 1바이트 이상) |
+  | 2 | CANCEL | `u32 transferId` |
+
+- **transferId**는 그 전송을 시작한 OFFER의 msgId입니다. 받는 쪽은 (보낸 peer, transferId)로 전송을 구분합니다.
+- OFFER의 ACK `OK`는 "사용자에게 물었다"는 뜻입니다. 같은 peer에서 온 끝나지 않은 전송이 이미 4개면 `BUSY`입니다. OFFER의 필드 뒤에 붙은 바이트는 무시합니다(나중에 필드를 더할 자리).
+- 받는 쪽의 답은 OFFER에 대한 `REPLY` DATA이고, payload는 `u8 result`입니다. 모르는 result는 실패로 봅니다.
+
+  | result | 이름 | 뜻 |
+  |---|---|---|
+  | 0 | ACCEPTED | 사용자가 승인함. 조각을 보내도 됨 |
+  | 1 | DECLINED | 사용자가 거절함 |
+  | 2 | CANCELED | 받는 중에 사용자가 취소함 |
+  | 3 | FAILED | 받지 못함(저장 공간 부족, 쓰기 오류, 순서가 틀린 조각, 조각이 끊김) |
+  | 4 | TIMEOUT | 사용자가 120초 동안 답하지 않음 |
+
+- **조각**: ACCEPTED를 받은 쪽은 파일을 앞에서부터 16 KiB(16,384바이트)씩 CHUNK로 보내고, ACK를 기다리는 조각을 최대 3개 둡니다. 9절의 peer당 4개 중 하나는 다른 메시지 몫입니다. 조각의 TTL은 60초이고, 가장 낮은 우선순위로 나갑니다(9절).
+- 받는 쪽은 조각을 파일에 쓴 뒤에 ACK `OK`를 보냅니다.
+  - offset부터 끝까지가 이미 받은 범위면(재전송) 쓰지 않고 `OK`입니다.
+  - offset이 받은 끝과 다르거나 size를 넘으면 `MALFORMED`로 답하고 FAILED를 보냅니다.
+  - 승인하지 않았거나 이미 끝난 전송의 조각에는 `DENIED`입니다. 보내는 쪽은 이것을 상대가 취소한 것으로 봅니다(CANCELED보다 먼저 올 수 있음).
+- 마지막 조각의 ACK는 파일을 닫은 뒤에 보냅니다. 그래서 보내는 쪽은 모든 조각의 ACK `OK`로 끝난 것을 압니다. 무결성은 조각마다 SEALED(AES-GCM), offset 확인, 전체 크기로 확인하고 해시는 따로 두지 않습니다.
+- **끊김**: 잠깐 끊기면 엔진이 TTL 안에서 같은 msgId로 다시 보내므로(9절) 전송이 이어집니다. 조각이 TTL 안에 확인되지 않으면 보내는 쪽이 실패로 끝내고 CANCEL을 보냅니다. 받는 쪽은 조각이 90초(조각 TTL보다 길게) 동안 오지 않으면 실패로 끝내고 FAILED를 보냅니다. 이어받기는 v1에 없습니다.
+- **취소**: 보내는 쪽은 CANCEL로, 받는 쪽은 CANCELED로 알립니다. 승인 전의 OFFER를 받는 쪽이 취소하는 것은 거절(DECLINED)입니다.
+- **시간 제한**: 받는 쪽 사용자는 120초 안에 답해야 합니다(지나면 TIMEOUT). 보내는 쪽은 답이 오가는 시간까지 130초를 기다리고, 그래도 없으면 실패로 끝내고 CANCEL을 보냅니다.
+- **이름**: 보내는 쪽은 255바이트가 넘는 이름을 줄입니다. 마지막 `.`부터의 확장자가 16바이트 이하면 확장자는 남기고 그 앞을 글자 단위로 자릅니다. 받는 쪽은 저장하기 전에 `/ \ : * ? " < > |`와 제어 문자를 `_`로 바꾸고, 앞의 `.`와 공백, 뒤의 공백을 지웁니다(남는 것이 없으면 `file`). mime은 `type/subtype` 꼴(영숫자와 `!#$&^_.+-`)이 아니면 `application/octet-stream`으로 봅니다.
+- **받은 파일**: 앱의 캐시 디렉터리(`received/`)에 저장하고, 사용자가 "저장"(Android 문서 선택기, iOS 파일 앱)이나 "앱으로 보내기"(공유 시트)로 내보냅니다. 하루가 지난 파일은 앱이 지웁니다.
+- **알림**: 앱이 화면에 없을 때 OFFER가 오면 알림을 띄우고, 승인은 앱 화면에서 합니다. 받기가 끝났을 때 앱이 화면에 없어도 알림을 띄웁니다.
+- 두 플랫폼 모두 CAPS에 `/file`을 넣습니다. 상대 CAPS에 없으면 보내지 않고 `NO_RECEIVER`로 끝납니다(상대 앱이 예전 버전).
+- 속도(Galaxy Z Fold5 ↔ Jump3에서 잼): central이 보낼 때(write with response) 200 KB에 약 30초(약 6.5 KB/s), peripheral이 보낼 때(notification) 300 KB에 약 24초(약 12 KB/s)입니다. 1 MB면 1.5–2.5분쯤 걸립니다.
+
+```
+A → B  DATA  #20  /file  ACK_REQ     [00 | size 40000 | "사진.jpg" | "image/jpeg"]  OFFER
+B → A  ACK   ref=#20 OK                                     B의 사용자에게 물음
+B → A  DATA  #5   /file  REPLY(#20)  [00]                   ACCEPTED
+A → B  DATA  #21  /file  ACK_REQ     [01 | 20 | 0     | 16,384바이트]
+A → B  DATA  #22  /file  ACK_REQ     [01 | 20 | 16384 | 16,384바이트]
+A → B  DATA  #23  /file  ACK_REQ     [01 | 20 | 32768 | 7,232바이트]
+B → A  ACK   ref=#21, #22, #23 OK                           #23의 ACK는 파일을 닫은 뒤
+```
 
 ### `/debug/chat` (없앰)
 
@@ -441,6 +490,7 @@ parcelable PeerInfo { String peerId; String name; boolean connected; }
 - 새 이벤트: `peers{peers}`(앱 페어링한 peer 전체 목록, 네이티브가 관리), `pairingRequest{deviceId, peerId, name, code, repair}`(양쪽 모두), `pairingResult{deviceId, peerId, result}`, `peerRejected{deviceId, reason, byPeer}`(REJECT reason, 6.5), `peerUnpaired{deviceId}`
 - 새 메서드: `respondPairing{deviceId, accept}`, `removeDevice{deviceId}`(지금의 `disconnectDevice`를 대신하고, UNPAIR를 보내고 K를 지움)
 - `setDeviceName{name}`(iOS): 기본값은 `UIDevice.current.name`("iPhone")
+- 파일 전송(10절의 `/file`): 메서드 `sendFile`, `respondFile`, `cancelFile`, `dismissFile`, `exportFile`, 이벤트 `fileTransfer`
 - 아직 없음: 미디어 조작 메서드
 
 ## 13. 보안 범위
@@ -485,5 +535,6 @@ parcelable PeerInfo { String peerId; String name; boolean connected; }
 - 서명 키 교체(APK Signature Scheme v3 rotation): v1은 현재 서명자만 비교합니다. 한쪽만 업데이트되면 두 폰의 해시가 달라져 `DENIED`가 됩니다
 - ~~Keystore HMAC 키 가져오기(`KeyProtection`)가 대상 기기(Samsung 등)에서 문제 없는지~~ Galaxy Z Fold5, S23(Android 17)에서 문제 없음. 실패하면 앱 prefs에 저장하고 로그를 남깁니다
 - 시간 제한, 윈도우, 대기열 크기 같은 숫자: 기기에서 측정한 뒤 조정합니다
+- `/file`: 조각 크기와 ACK를 기다리는 조각 수(16 KiB × 3)를 바꾸면 빨라지는지. 지금 값으로 잰 속도는 10절에 있습니다. central 쪽이 느린 것은 조각마다 write 응답을 기다리기 때문으로 보입니다
 - store-and-forward가 필요한지
 - peer별로 "원격 조작"과 "앱 간 통신"을 따로 허용하는 토글이 필요한지

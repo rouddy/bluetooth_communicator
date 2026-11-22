@@ -108,7 +108,10 @@ void main() {
   testWidgets('it needs a connection', (tester) async {
     await openDevicePage(tester, connected: false);
 
-    expect(find.text('연결되면 쓸 수 있습니다'), findsOneWidget);
+    expect(
+      find.descendant(of: find.widgetWithText(ListTile, '클립보드 가져오기'), matching: find.text('연결되면 쓸 수 있습니다')),
+      findsOneWidget,
+    );
     await tester.tap(find.text('클립보드 가져오기'));
     await tester.pump();
     expect(nativeCalls.where((call) => call.method == 'requestClipboard'), isEmpty);

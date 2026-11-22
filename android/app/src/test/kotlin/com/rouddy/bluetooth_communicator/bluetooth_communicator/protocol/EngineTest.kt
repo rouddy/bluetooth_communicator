@@ -268,6 +268,21 @@ class EngineTest {
     }
 
     @Test
+    fun `a bulk message lets other messages go first`() {
+        pair()
+
+        val results = mutableListOf<Int>()
+        a.engine.send(b.peerId, "${TEST_APP.packageName}/bulk", ByteArray(2_000), 0, 0, TEST_APP, bulk = true) {
+            results += it
+        }
+        a.send(b, "quick".toByteArray())
+        settle()
+
+        assertEquals(listOf("${TEST_APP.packageName}/chat", "${TEST_APP.packageName}/bulk"), b.delivered.map { it.path })
+        assertEquals(listOf(DeliveryStatus.OK), results)
+    }
+
+    @Test
     fun `a reply is not acknowledged and carries what it answers`() {
         pair()
 

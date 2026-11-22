@@ -144,6 +144,16 @@ vectors = {
         # /clipboard (10절): a GET_TEXT request, and an OK reply carrying the text.
         "clipboardRequest": data_envelope(12, 0x01, "/clipboard", 0, bytes([0])).hex(),
         "clipboardReply": data_envelope(13, 0x02, "/clipboard", 12, bytes([0]) + "복사한 텍스트".encode()).hex(),
+        # /file (10절): OFFER (u64 size, u8-prefixed name and mime), ACCEPTED, a CHUNK
+        # (u32 transferId, u64 offset, data), and CANCEL; the transferId is the
+        # OFFER's msgId.
+        "fileOffer": data_envelope(20, 0x01, "/file", 0, bytes([0]) + struct.pack("<Q", 40000)
+                                   + bytes([len("사진.jpg".encode())]) + "사진.jpg".encode()
+                                   + bytes([len(b"image/jpeg")]) + b"image/jpeg").hex(),
+        "fileReply": data_envelope(21, 0x02, "/file", 20, bytes([0])).hex(),
+        "fileChunk": data_envelope(22, 0x01, "/file", 0, bytes([1]) + struct.pack("<IQ", 20, 16384)
+                                   + bytes([1, 2, 3, 4])).hex(),
+        "fileCancel": data_envelope(23, 0x01, "/file", 0, bytes([2]) + struct.pack("<I", 20)).hex(),
     },
     "records": {
         "auth": (bytes([1, 0x02]) + bytes([0xAA]) * 32).hex(),

@@ -76,6 +76,28 @@ import UIKit
         let args = call.arguments as? [String: Any]
         self.bleManager.setDeviceName(args?["name"] as? String)
         result(nil)
+      case "sendFile":
+        let args = call.arguments as? [String: Any]
+        self.bleManager.sendFile(args?["deviceId"] as? String, path: args?["path"] as? String, result: result)
+      case "respondFile", "cancelFile", "dismissFile", "exportFile":
+        let args = call.arguments as? [String: Any]
+        guard let id = (args?["id"] as? NSNumber)?.int64Value else {
+          result(FlutterError(code: "BAD_ARGS", message: "id is required", details: nil))
+          return
+        }
+        switch call.method {
+        case "respondFile":
+          self.bleManager.files.respond(id: id, accept: (args?["accept"] as? Bool) ?? false)
+          result(nil)
+        case "cancelFile":
+          self.bleManager.files.cancel(id: id)
+          result(nil)
+        case "dismissFile":
+          self.bleManager.files.dismiss(id: id)
+          result(nil)
+        default:
+          self.bleManager.files.export(id: id, action: args?["action"] as? String ?? "", result: result)
+        }
       default:
         result(FlutterMethodNotImplemented)
       }
@@ -128,6 +150,15 @@ final class IOSBleBackgroundManager: NSObject, FlutterStreamHandler, EngineHost 
   private let store = IOSPeerStore()
   private let scheduler = MainQueueScheduler()
   private lazy var engine = ProtocolEngine(host: self, store: store, scheduler: scheduler)
+  /// File transfer (`/file`): the `sendFile`/`respondFile`/… methods and `fileTransfer` events.
+  private(set) lazy var files = FileShare(
+    engine: engine, scheduler: scheduler,
+    emit: { [unowned self] type, payload in self.emit(type: type, payload: payload) },
+    deviceId: { [unowned self] peerId in self.deviceId(forPeer: peerId) },
+    peerName: { [unowned self] peerId in
+      let name = self.store.peers().first { $0.peerId == peerId }?.name ?? ""
+      return name.isEmpty ? self.deviceId(forPeer: peerId) : name
+    })
 
   private lazy var centralManager: CBCentralManager = {
     CBCentralManager(
@@ -225,6 +256,7 @@ final class IOSBleBackgroundManager: NSObject, FlutterStreamHandler, EngineHost 
     engine.connectedSessions().forEach(emitDartEvent)
     emitPeers()
     engine.pendingApprovals().forEach(emitDartEvent)
+    files.replay()
     emitStatus()
   }
 
@@ -328,6 +360,7 @@ final class IOSBleBackgroundManager: NSObject, FlutterStreamHandler, EngineHost 
     }
     var remaining = peers.count
     for peer in peers {
+      files.transfers.peerRemoved(peer.peerId)
       let known = peripheralIds.removeValue(forKey: peer.peerId.description)
       prefs.set(peripheralIds, forKey: peripheralIdsKey)
       engine.removePeer(peer.peerId) { [weak self] in
@@ -488,11 +521,20 @@ final class IOSBleBackgroundManager: NSObject, FlutterStreamHandler, EngineHost 
     UIApplication.shared.applicationState == .active && eventSink != nil
   }
 
-  /// iOS has no AIDL, so it receives no app messages; of the built-in paths, only
-  /// `/clipboard`.
-  func localCaps() -> Capabilities { Capabilities(builtins: [ClipboardMessage.path], apps: []) }
+  /// iOS has no AIDL, so it receives no app messages; of the built-in paths,
+  /// `/clipboard` and `/file`.
+  func localCaps() -> Capabilities { Capabilities(builtins: [ClipboardMessage.path, FileMessage.path], apps: []) }
 
   func deliver(peerId: PeerId, data: DataEnvelope, done: @escaping (Int) -> Void) {
+    if data.path == FileMessage.path {
+      if data.isReply {
+        files.transfers.onReply(peerId: peerId, data: data)
+        done(DeliveryStatus.ok)
+      } else {
+        files.transfers.onRequest(peerId: peerId, data: data, done: done)
+      }
+      return
+    }
     if data.path == ClipboardMessage.path {
       if data.isReply {
         onClipboardReply(data)
@@ -518,6 +560,15 @@ final class IOSBleBackgroundManager: NSObject, FlutterStreamHandler, EngineHost 
 
   func setClipboardSharing(_ enabled: Bool) {
     prefs.set(enabled, forKey: clipboardSharingKey)
+  }
+
+  /// Offers a file to the peer at `deviceId` (`/file`): the one at `path`, or one the
+  /// user picks. The result is whether a file was offered; `fileTransfer` events follow.
+  func sendFile(_ deviceId: String?, path: String?, result: @escaping FlutterResult) {
+    guard let deviceId, let peerId = peerId(forDevice: deviceId) else {
+      return result(FlutterError(code: "NOT_PAIRED", message: "No app-paired peer at \(deviceId ?? "nil")", details: nil))
+    }
+    files.sendFile(peerId: peerId, path: path, result: result)
   }
 
   /// Asks the peer at `deviceId` for its clipboard; answered by `clipboard` events.
@@ -660,6 +711,9 @@ final class IOSBleBackgroundManager: NSObject, FlutterStreamHandler, EngineHost 
       DispatchQueue.main.async { [weak self] in self?.reconnectPeers() }
     case .peersChanged:
       schedulePeersEvent()
+    case .peerUnpaired(_, let peerId):
+      files.transfers.peerRemoved(peerId)
+      emitDartEvent(event)
     default:
       emitDartEvent(event)
     }

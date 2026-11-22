@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Received files, shared with other apps through FileShare.shareIntent. -->
+<paths>
+    <cache-path name="received" path="received/" />
+</paths>
