@@ -102,7 +102,15 @@ class VectorsTest {
             "clipboardRequest" to Envelope.Data(12, Envelope.FLAG_ACK_REQ, ClipboardMessage.PATH, 0, ClipboardMessage.request()),
             "clipboardReply" to Envelope.Data(
                 13, Envelope.FLAG_REPLY, ClipboardMessage.PATH, 12, ClipboardMessage.replyWithText("복사한 텍스트")
-            )
+            ),
+            "fileOffer" to Envelope.Data(
+                20, Envelope.FLAG_ACK_REQ, FileMessage.PATH, 0, FileMessage.offer(40_000, "사진.jpg", "image/jpeg")
+            ),
+            "fileReply" to Envelope.Data(21, Envelope.FLAG_REPLY, FileMessage.PATH, 20, FileMessage.reply(FileMessage.ACCEPTED)),
+            "fileChunk" to Envelope.Data(
+                22, Envelope.FLAG_ACK_REQ, FileMessage.PATH, 0, FileMessage.chunk(20, 16_384, byteArrayOf(1, 2, 3, 4))
+            ),
+            "fileCancel" to Envelope.Data(23, Envelope.FLAG_ACK_REQ, FileMessage.PATH, 0, FileMessage.cancel(20))
         ).forEach { (name, envelope) ->
             assertArrayEquals(name, envelopes.hex(name), Envelope.encode(envelope))
             assertArrayEquals(name, envelopes.hex(name), Envelope.encode(Envelope.decode(envelopes.hex(name))))

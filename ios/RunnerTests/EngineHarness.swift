@@ -135,7 +135,13 @@ final class Phone: EngineHost {
 
   func localCaps() -> Capabilities { caps }
 
+  /// Takes a delivery before the default handling when it returns true.
+  var handler: ((PeerId, DataEnvelope, @escaping (Int) -> Void) -> Bool)?
+
   func deliver(peerId: PeerId, data: DataEnvelope, done: @escaping (Int) -> Void) {
+    if handler?(peerId, data, done) == true {
+      return
+    }
     delivered.append(data)
     if let status = deliverStatus {
       done(status)

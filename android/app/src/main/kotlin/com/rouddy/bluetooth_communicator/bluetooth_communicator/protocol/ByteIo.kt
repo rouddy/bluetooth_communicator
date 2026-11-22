@@ -22,6 +22,12 @@ class ByteWriter(capacity: Int = 64) {
         }
     }
 
+    /** u64; sizes and offsets, which never reach 2^63. */
+    fun u64(value: Long) = apply {
+        u32(value and 0xFFFF_FFFFL)
+        u32(value ushr 32)
+    }
+
     fun bytes(value: ByteArray) = apply { out.write(value) }
 
     fun toByteArray(): ByteArray = out.toByteArray()
@@ -44,6 +50,12 @@ class ByteReader(private val data: ByteArray, private var position: Int = 0) {
             value = value or (u8().toLong() shl shift)
         }
         return value
+    }
+
+    /** u64 as a Long; values from 2^63 up come out negative. */
+    fun u64(): Long {
+        val low = u32()
+        return low or (u32() shl 32)
     }
 
     fun bytes(count: Int): ByteArray {

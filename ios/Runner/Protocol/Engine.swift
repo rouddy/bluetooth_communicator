@@ -171,7 +171,9 @@ final class ProtocolEngine {
   static let priorityAck = 1
   static let priorityControl = 2
   static let priorityData = 3
-  private static let priorityCount = 4
+  /// File chunks (`/file`): below everything else, so they don't hold it up.
+  static let priorityBulk = 4
+  private static let priorityCount = 5
 
   static let handshakeTimeoutMs: Int64 = 10_000
   static let approvalTimeoutMs: Int64 = 60_000
@@ -1251,11 +1253,12 @@ final class ProtocolEngine {
 
   /// Sends `payload` to `path` on `peerId`. `callback` gets an ACK status or a local
   /// result (`DeliveryStatus`) exactly once. Returns the msgId, or 0 if it failed
-  /// right away. `app` is the sending app, checked against the peer's CAPS.
+  /// right away. `app` is the sending app, checked against the peer's CAPS. A `bulk`
+  /// message (a file chunk) goes out after every other kind (9절).
   @discardableResult
   func send(
     peerId: PeerId, path: String, payload: Data, replyTo: UInt32, ttlMs: Int64, app: AppIdentity?,
-    callback: @escaping (Int) -> Void
+    bulk: Bool = false, callback: @escaping (Int) -> Void
   ) -> UInt32 {
     if path.isEmpty || path.utf8.count > Envelope.maxPathBytes {
       callback(DeliveryStatus.malformed)
@@ -1271,7 +1274,8 @@ final class ProtocolEngine {
     let outgoing = Outgoing(
       msgId: msgId,
       envelope: .data(DataEnvelope(msgId: msgId, flags: flags, path: path, replyTo: replyTo, payload: payload)),
-      priority: control ? ProtocolEngine.priorityControl : ProtocolEngine.priorityData,
+      priority: control
+        ? ProtocolEngine.priorityControl : (bulk ? ProtocolEngine.priorityBulk : ProtocolEngine.priorityData),
       app: app,
       callback: callback)
     let channel = channel(peerId)

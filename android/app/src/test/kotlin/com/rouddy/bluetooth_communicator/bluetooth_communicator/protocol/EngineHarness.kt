@@ -106,7 +106,13 @@ class Phone(
 
     override fun localCaps() = caps
 
+    /** Takes a delivery before the default handling when it returns true. */
+    var handler: ((PeerId, Envelope.Data, (Int) -> Unit) -> Boolean)? = null
+
     override fun deliver(peerId: PeerId, data: Envelope.Data, done: (Int) -> Unit) {
+        if (handler?.invoke(peerId, data, done) == true) {
+            return
+        }
         delivered += data
         val status = deliverStatus
         if (status == null) {

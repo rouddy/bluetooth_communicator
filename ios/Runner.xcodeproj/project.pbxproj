@@ -7,6 +7,9 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		0703C53EDB5F838493A6A30F /* FileTransfersTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63977096BF178F9B2DDEB74E /* FileTransfersTests.swift */; };
+		0AF723598512BD269268A1A1 /* FileMessageTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4FFD4A7C079F0C4EB884A39 /* FileMessageTests.swift */; };
+		B15EAE5E752F05FBC0C3672A /* FileTransfer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 80695088FDDCC8A3003B86E7 /* FileTransfer.swift */; };
 		9EDAB77146CCB9770D2F90BA /* Clipboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D6388CE1CDB342C74D40F78 /* Clipboard.swift */; };
 		3AB9133377F63CE4BD647C3E /* IOSPeerStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 91AF0DBA8B3FBEEAF1B46056 /* IOSPeerStore.swift */; };
 		95344A6B321E0E40C762D92B /* EngineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD5BC970498535E648701B84 /* EngineTests.swift */; };
@@ -54,6 +57,9 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		63977096BF178F9B2DDEB74E /* FileTransfersTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileTransfersTests.swift; sourceTree = "<group>"; };
+		D4FFD4A7C079F0C4EB884A39 /* FileMessageTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileMessageTests.swift; sourceTree = "<group>"; };
+		80695088FDDCC8A3003B86E7 /* FileTransfer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileTransfer.swift; sourceTree = "<group>"; };
 		1D6388CE1CDB342C74D40F78 /* Clipboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Clipboard.swift; sourceTree = "<group>"; };
 		91AF0DBA8B3FBEEAF1B46056 /* IOSPeerStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IOSPeerStore.swift; sourceTree = "<group>"; };
 		BD5BC970498535E648701B84 /* EngineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineTests.swift; sourceTree = "<group>"; };
@@ -100,6 +106,7 @@
 		305D078B1B61BABB936C7BA3 /* Protocol */ = {
 			isa = PBXGroup;
 			children = (
+				80695088FDDCC8A3003B86E7 /* FileTransfer.swift */,
 				1D6388CE1CDB342C74D40F78 /* Clipboard.swift */,
 				BC266A8742F21BCD83834FE5 /* Engine.swift */,
 				66C89D7B426282BD2A562C66 /* Crypto.swift */,
@@ -114,6 +121,8 @@
 		331C8082294A63A400263BE5 /* RunnerTests */ = {
 			isa = PBXGroup;
 			children = (
+				D4FFD4A7C079F0C4EB884A39 /* FileMessageTests.swift */,
+				63977096BF178F9B2DDEB74E /* FileTransfersTests.swift */,
 				BD5BC970498535E648701B84 /* EngineTests.swift */,
 				29175F5D6638DF868305D5AD /* EngineHarness.swift */,
 				385F6689688E1DA644396943 /* VectorsTests.swift */,
@@ -317,6 +326,8 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				0AF723598512BD269268A1A1 /* FileMessageTests.swift in Sources */,
+				0703C53EDB5F838493A6A30F /* FileTransfersTests.swift in Sources */,
 				95344A6B321E0E40C762D92B /* EngineTests.swift in Sources */,
 				DAFF310809C1F95A3A77A72B /* EngineHarness.swift in Sources */,
 				08D56AEE6424369E00BAF394 /* VectorsTests.swift in Sources */,
@@ -329,6 +340,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B15EAE5E752F05FBC0C3672A /* FileTransfer.swift in Sources */,
 				9EDAB77146CCB9770D2F90BA /* Clipboard.swift in Sources */,
 				3AB9133377F63CE4BD647C3E /* IOSPeerStore.swift in Sources */,
 				29ED770145C40B4F2CEA8825 /* Engine.swift in Sources */,
