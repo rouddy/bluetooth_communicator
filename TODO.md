@@ -7,7 +7,7 @@
 - **P3**: 구조 개선, 품질
 
 근거 표시
-- `확인됨`: 두 Galaxy 기기에서 재현했거나 직접 관찰함
+- `확인됨`: 기기(Galaxy 두 대, 또는 Galaxy와 iPhone)에서 재현했거나 직접 관찰함
 - `코드`: 코드상 확실하지만 기기에서는 재현하지 않음
 - `추정`: 검증이 필요함
 
@@ -117,6 +117,29 @@
   - 네이티브에서 메시지를 저장합니다(파일 또는 DB). Dart가 연결되면 저장된 메시지를 다시 보냅니다.
   - 메시지를 받으면 로컬 알림을 띄우고, Dart 쪽 기록도 영구 저장합니다.
 
+### 34. 파일 전송 중 링크가 끊기면 다시 연결돼도 전송이 이어지지 않음 `확인됨` (원인은 `추정`)
+- 확인(2026-11-22, Fold5 ↔ AlgorigoSE): Fold5 → iPhone으로 1MB를 보내다가 약 70%에서 Fold5의 Bluetooth를 껐다 켰습니다. 두 폰은 약 1분 동안 링크를 세 번 바꿨고(00:04:11, 00:04:44, 00:05:12), 그 뒤 전송은 868.4KB / 1.0MB에서 멈춰 있었습니다(iPhone에 받은 파일은 864KB, 16KiB 조각 54개). 마지막으로 본 것은 링크가 자리 잡고 약 30초 뒤입니다. 그 뒤 adb가 끊겨서 결국 실패로 끝났는지는 보지 못했습니다.
+- 링크가 바뀐 과정(매번 같음)
+  1. iPhone이 central로 다시 연결합니다(20바이트 프레임, 35번).
+  2. Fold5도 central로 연결하고, 양쪽 모두 `/ping`으로 iPhone-central 링크가 죽었다고 판단해 Fold5-central 링크를 남깁니다.
+  3. iPhone이 자기 client 링크를 닫습니다(`cancelPeripheralConnection`).
+  4. 약 25초 뒤 남긴 링크도 끊깁니다(Fold5: `Frame … failed: Disconnected`).
+  - 세 번째에는 iPhone이 Fold5의 새 링크를 `alreadyConnected`로 거절해서, 20바이트 프레임 링크가 남았습니다.
+- 추정 원인: iPhone이 client 링크를 닫으면 두 폰이 같이 쓰는 연결 자체가 끊깁니다. Android에서 `idleClients`로 막은 문제(23번의 "중복 client 연결을 닫으면 남은 링크까지 끊기는 문제")와 같은 모양인데, iOS에는 그런 처리가 없습니다.
+- 수정 방향
+  - iOS도 엔진이 버린 client 연결을, 상대가 이쪽 server에 연결해 있는 동안에는 닫지 않고 둡니다. 그 링크가 끝날 때 재사용하거나 닫습니다(Android `idleClients`와 같게).
+  - 고친 뒤 같은 절차(전송 중 Bluetooth 껐다 켜기)를 다시 해서, 엔진의 재전송으로 전송이 끝나는지 확인합니다. chunk TTL(60초) 안에 링크가 돌아오면 이어져야 합니다.
+  - iPhone 로그는 `devicectl device process launch --console`로 봅니다(37번).
+
+### 36. iOS 앱이 다시 시작되면 복원된 peripheral 링크가 HELLO를 영원히 기다림 `확인됨`
+- 확인(2026-11-22): Fold5가 central로 iPhone에 연결된 상태에서 iPhone 앱을 다시 실행하면(flutter drive, devicectl 모두), 매번 `Link 1 up: PERIPHERAL`이 찍힌 뒤 HELLO가 오지 않았습니다. Fold5는 세션이 살아 있다고 보고 아무것도 보내지 않습니다. iPhone의 central 모드를 끈 상태(`CENTRAL=false`)에서는 Fold5의 Bluetooth를 껐다 켤 때까지 통신이 되지 않았습니다.
+- 원인: `peripheralManager(_:willRestoreState:)`가 구독 중인 central을 HELLO_c를 기다리는 링크로 되살립니다. 주석은 "새 HELLO_c가 링크를 살린다"고 가정하지만, 복원된 GATT 서비스는 바뀌지 않아서 Service Changed가 가지 않고, central은 다시 핸드셰이크할 이유를 모릅니다. HELLO_c는 central만 보냅니다(docs/protocol.md 6.1).
+- central 모드가 켜져 있으면(기본값) iPhone이 central로 새로 연결하고, Fold5가 `/ping`으로 예전 링크가 죽은 것을 확인해 바꾸므로 복구됩니다(기기에서 확인함). 문제가 되는 것은 iPhone의 central이 꺼져 있을 때입니다. iOS가 백그라운드에서 앱을 종료했다가 BLE 이벤트로 다시 실행하는 경우도 같은 경로입니다(`추정`).
+- 33번(상대 앱이 죽은 뒤 central을 끄면 다시 연결하지 않음)과 반대 방향의 같은 문제입니다.
+- 수정 방향(둘 중 하나)
+  - iOS: 상태를 복원했을 때 서비스를 지우고 다시 등록합니다(`removeAllServices` 후 `add`). 연결된 central은 Service Changed를 받아(Android `onServiceChanged`, iOS `didModifyServices`) 다시 구독하고 HELLO_c를 보냅니다. 두 central 모두 이 경우 다시 핸드셰이크하도록 이미 구현되어 있습니다. iOS가 같은 서비스를 다시 등록할 때 Service Changed를 보내는지 기기에서 확인해야 합니다.
+  - 프로토콜: AWAIT_HELLO인 peripheral 링크에 SEALED 레코드가 오면 central이 다시 핸드셰이크하도록 신호(REJECT 등)를 보냅니다. 두 플랫폼과 docs/protocol.md를 함께 바꿔야 합니다.
+
 ---
 
 ## P2: 안정성, UX, 배터리
@@ -223,6 +246,11 @@
 - 이쪽이 peripheral인 세션에서 상대 앱이 죽으면(Galaxy에서는 Bluetooth 연결이 그대로 남음), 이쪽 링크는 상대가 다시 연결해 올 때까지 "연결됨"으로 남습니다. 다시 시작한 상대 앱의 central이 꺼져 있으면, 이쪽도 살아 있는 링크가 있다고 보고 연결하지 않습니다.
 - 수정 방향: peripheral 링크도 주기적으로(또는 스캔에서 상대가 다시 보일 때) `/ping`으로 확인합니다.
 
+### 35. 재연결 직후 링크가 20바이트 프레임으로 맺어짐 `확인됨`
+- 확인(2026-11-22, 34번 재현 중): Fold5의 Bluetooth를 껐다 켠 뒤 iPhone이 central로 다시 연결한 링크가 양쪽 모두 20바이트 프레임이었습니다(iPhone `Link 5 up: CENTRAL … frames of 20 bytes`, Fold5 `Link 42/47/50 up: PERIPHERAL … frames of 20 bytes`). iPhone은 구독이 끝난 시점(연결 후 약 0.1초)에 `maximumWriteValueLength(for: .withoutResponse)`를 읽는데, 이때 MTU 교환이 아직 끝나지 않은 것으로 보입니다. Fold5 server도 그 연결의 MTU를 몰랐습니다(`attMtu` 없음).
+- 영향: 16KiB 조각 하나가 프레임 약 820개가 됩니다. 이 링크로 보낸 `/ping`은 3초 안에 답을 받지 못해 죽은 링크로 판정됐습니다(34번). 파일 전송이 멈춘 것처럼 보인 이유일 수도 있습니다(`추정`).
+- 수정 방향: 링크를 올린 뒤에 MTU가 늘어나면 엔진에 알려 프레임 크기를 키웁니다(iOS는 write할 때 `maximumWriteValueLength`를 다시 읽고, Android는 `onMtuChanged`). 엔진에는 링크의 프레임 크기를 바꾸는 API가 필요합니다. 또는 iOS central이 MTU를 알 때까지 잠시 기다린 뒤 링크를 올립니다. `/ping` 제한 시간을 프레임 크기에 맞출지도 검토합니다.
+
 ---
 
 ## P3: 구조, 품질
@@ -267,6 +295,15 @@
 - `README.md`와 `pubspec.yaml`의 description이 Flutter 템플릿 그대로입니다.
 - Android의 앱 이름(`android:label`)이 `bluetooth_communicator`입니다.
 
+### 37. flutter drive로 돌리면 iPhone peripheral 테스트가 재연결을 보지 못함 `확인됨` (원인 모름)
+- 확인(2026-11-22): `pairing_test.dart`를 `CENTRAL=false`로 flutter drive에서 돌리면, Fold5는 iPhone과 세션을 맺었다고 기록하는데 iPhone 쪽에는 구독 해제, 링크, HELLO 로그가 하나도 오지 않았고 화면도 `연결 안 됨`이었습니다(세 번 재현). 같은 빌드를 `devicectl`로 설치하고 실행하면 정상이었습니다.
+- 지금은 iPhone이 peripheral인 테스트를 이렇게 돌립니다.
+  - `flutter build ios --profile -t integration_test/pairing_test.dart --dart-define=…`
+  - `xcrun devicectl device install app --device <udid> build/ios/iphoneos/Runner.app`
+  - `xcrun devicectl device process launch --device <udid> --terminate-existing --console com.rouddy.bluetoothcommunicator.bluetoothCommunicator`
+  - 드라이버 없이 테스트가 돌고, `--console`에 네이티브 `[BLE]` 로그가 나옵니다(몇 분 뒤 끊기기도 함). Dart의 `debugPrint`는 나오지 않으므로, 받은 파일은 `devicectl device info files`와 `copy from`으로 꺼내 확인합니다.
+- 함께 알게 된 것: flutter drive는 테스트가 끝나면 앱을 지웁니다(`--keep-app-running`이 없을 때). 그래서 실행할 때마다 iPhone 앱이 새로 설치되고 peer가 사라졌습니다. CLAUDE.md의 명령에 반영했습니다.
+
 ---
 
 ## 기기 테스트 대기
@@ -284,3 +321,10 @@
 
 ### 29. 가로 모드 채팅 화면 (2026-10-28)
 - 채팅 UI를 없애서 더는 필요 없습니다.
+
+### 파일 전송: iPhone의 화면과 알림 (2026-11-22)
+- 확인한 것: Fold5 ↔ AlgorigoSE에서 양방향 전송을 iPhone이 central일 때와 peripheral일 때 모두 해서 체크섬이 일치했습니다(CLAUDE.md의 알려진 한계 참고).
+- 파일 선택기: iPhone의 `파일 보내기`(`UIDocumentPickerViewController`)로 파일을 골라 보냅니다. 테스트는 `path`로 선택기를 건너뛰었습니다.
+- 내보내기: 받은 파일의 `저장`(Files로 내보내기, 저장하면 `true`, 취소하면 `false`)과 `앱으로 보내기`(공유 시트)를 확인합니다.
+- 백그라운드 알림: 앱을 백그라운드로 보내고(설정 앱 실행) Fold5에서 파일을 보냈지만 배너가 보이지 않았습니다. iPhone이 수면 집중 모드여서 앱 문제인지 알 수 없습니다. 집중 모드를 끄고, 알림 권한(처음 `initialize` 때 요청)이 허용됐는지 확인한 뒤 다시 봅니다. 상대가 취소하면 알림이 지워지는지도 확인합니다.
+- iPhone 사용자가 거절하거나 취소하는 경우도 기기에서 하지 않았습니다(엔진 로직은 Swift 테스트와 Android 기기에서 확인함).
