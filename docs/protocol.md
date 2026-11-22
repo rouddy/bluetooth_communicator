@@ -453,7 +453,7 @@ B → A  DATA  #7   /control/media  REPLY(#41)  [00 01]  성공, 재생 중
 interface IBleCommunicator {
     int getApiVersion();
     List<PeerInfo> getPeers();
-    // replyTo가 0이면 일반 메시지. 반환값은 이 요청의 로컬 id
+    // replyTo가 0이면 일반 메시지. 반환값은 이 메시지의 msgId(API v2)
     long send(String peerId, String path, in byte[] data, long replyTo,
               long ttlMillis, IBleSendCallback callback);
     void registerListener(IBleListener listener);
@@ -472,11 +472,13 @@ oneway interface IBleSendCallback {
 parcelable PeerInfo { String peerId; String name; boolean connected; }
 ```
 
+- `send()`는 메시지의 msgId를 돌려줍니다(API v2. v1은 로컬 요청 id였음). msgId는 바인더 스레드에서 바로 정하므로, 앱은 상대의 답장(`replyTo`가 그 msgId인 메시지)보다 먼저 받습니다. 그래서 요청과 답장을 짝지을 수 있습니다. 곧바로 실패하는 요청(`DENIED` 등)도 id를 받고, `onResult`는 언제나 한 번 옵니다.
 - `getPeers()`는 CAPS에 호출자와 같은 앱 식별자가 있는 peer만 돌려줍니다.
 - 앱은 자기 패키지의 path만 받으므로, listener에는 path 필터가 없습니다.
 - **수신 경로**: 등록된 listener가 있으면 `onMessage`로 넘기고 ACK `OK`를 보냅니다. listener가 없으면, 클라이언트 앱이 action `com.rouddy.bluetooth_communicator.action.RECEIVE`로 선언한 service(`IBleListener`를 돌려줌)에 bind해서 넘깁니다(Wear OS의 `WearableListenerService` 방식). 둘 다 없으면 `NO_RECEIVER`입니다.
 - Android 11+ 패키지 가시성 때문에 이 앱의 manifest에 그 action의 `<queries>`가 필요합니다.
 - CAPS의 앱 목록은 listener가 등록된 앱과 RECEIVE service를 선언한 앱입니다. 등록·해제와 `PACKAGE_ADDED`/`PACKAGE_REMOVED` 때 갱신합니다.
+- **등록된 앱 목록**: listener를 등록했거나 RECEIVE service를 선언한 앱을 (패키지명, 인증서 해시, 이름, 등록·마지막 사용 시각)으로 저장해 두고 설정 화면에 보여 줍니다. 같은 패키지명이라도 인증서가 다르면 새로 등록한 것으로 봅니다. 앱을 삭제하면 목록에서 지웁니다: 프로세스가 떠 있을 때는 동적 receiver(`PACKAGE_REMOVED`, 업데이트 제외), 떠 있지 않을 때는 manifest receiver(`PACKAGE_FULLY_REMOVED`, Android 8 이후에도 manifest로 받을 수 있는 예외 broadcast), 둘 다 놓친 것은 시작할 때 설치 여부를 확인해서 지웁니다. Android 11 패키지 가시성 때문에 RECEIVE service가 없는 앱은 부팅 후 한 번 bind하기 전에는 보이지 않으므로, 재부팅 뒤에는 목록에서 빠졌다가 다음 listener 등록 때 다시 들어옵니다.
 - 데이터 크기는 상대 `maxMessageSize`에서 헤더 크기를 뺀 값까지입니다(64KiB 수준이라 Binder 한도와는 상관없음).
 - 앱 개발자에게 알릴 것: 드물게 같은 메시지가 두 번 올 수 있으니 (peerId, msgId)로 거릅니다. `EXPIRED_UNCONFIRMED`는 상대가 받았을 수도 있다는 뜻입니다.
 

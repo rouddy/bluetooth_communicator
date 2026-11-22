@@ -27,9 +27,15 @@ import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * The apps on this phone that use the AIDL service (docs/protocol.md 8절, 11절):
- * who can receive (a registered listener, or a declared RECEIVE service), what that
- * makes our CAPS, and handing them messages. State changes on the main looper; the
- * certificate lookups also run on binder threads.
+ * the registered apps (kept in [RegisteredApps]), who of them can receive (a
+ * registered listener, or a declared RECEIVE service), what that makes our CAPS,
+ * and handing them messages. State changes on the main looper; the certificate
+ * lookups also run on binder threads.
+ *
+ * An app registers by registering a listener or by declaring a RECEIVE service, and
+ * leaves the list when it's uninstalled: the package broadcasts while this process
+ * runs, [PackageRemovedReceiver] while it doesn't, and [reconcile] at startup for
+ * what both missed.
  */
 class AppRegistry(private val context: Context) : AppRouter {
     private val packageManager = context.packageManager
@@ -41,11 +47,13 @@ class AppRegistry(private val context: Context) : AppRouter {
     private val certHashes = ConcurrentHashMap<String, String>()
     private val queued = ConcurrentHashMap<String, AtomicInteger>()
     private val receivers = HashMap<String, ReceiverConnection>()
+    private val apps = registeredApps(context)
 
     @Volatile
     private var caps = Capabilities(emptyList(), emptyList())
 
     init {
+        reconcile()
         caps = computeCaps()
         // Installing, updating, or removing an app can change who receives, and with
         // which certificate.
@@ -53,18 +61,92 @@ class AppRegistry(private val context: Context) : AppRouter {
             context,
             object : BroadcastReceiver() {
                 override fun onReceive(context: Context, intent: Intent) {
-                    intent.data?.schemeSpecificPart?.let(certHashes::remove)
-                    refreshCaps()
+                    val packageName = intent.data?.schemeSpecificPart ?: return
+                    when {
+                        // An update removes the old version first; PACKAGE_REPLACED follows.
+                        intent.action == Intent.ACTION_PACKAGE_REMOVED &&
+                            intent.getBooleanExtra(Intent.EXTRA_REPLACING, false) -> certHashes.remove(packageName)
+                        intent.action == Intent.ACTION_PACKAGE_REMOVED ||
+                            intent.action == Intent.ACTION_PACKAGE_FULLY_REMOVED -> onPackageRemoved(packageName)
+                        else -> onPackageChanged(packageName)
+                    }
                 }
             },
             IntentFilter().apply {
                 addAction(Intent.ACTION_PACKAGE_ADDED)
                 addAction(Intent.ACTION_PACKAGE_REPLACED)
                 addAction(Intent.ACTION_PACKAGE_REMOVED)
+                addAction(Intent.ACTION_PACKAGE_FULLY_REMOVED)
                 addDataScheme("package")
             },
             ContextCompat.RECEIVER_NOT_EXPORTED
         )
+    }
+
+    /** The registered apps, in registration order. */
+    fun registeredApps(): List<RegisteredApp> = apps.list()
+
+    /**
+     * Drops the registered apps that were uninstalled while nothing was listening,
+     * then registers the apps that declare a RECEIVE service.
+     *
+     * An app without a RECEIVE service is visible to us (Android 11 package
+     * visibility) only once it has bound since the phone started. After a reboot
+     * it's missing here, so it's dropped too, and registers again when it next
+     * registers a listener.
+     */
+    private fun reconcile() {
+        val gone = apps.reconcile(::identity)
+        if (gone.isNotEmpty()) {
+            Log.i(TAG, "Uninstalled since the last run: $gone")
+        }
+        receiveServices().map { it.packageName }.distinct().forEach(::registerPackage)
+    }
+
+    /** Registers [packageName] if it's installed; returns whether the list changed. */
+    private fun registerPackage(packageName: String): Boolean {
+        if (packageName == context.packageName) {
+            return false
+        }
+        val identity = identity(packageName) ?: return false
+        return apps.register(identity, label(packageName))
+    }
+
+    private fun label(packageName: String): String = runCatching {
+        packageManager.getApplicationInfo(packageName, 0).loadLabel(packageManager).toString()
+    }.getOrNull()?.takeIf { it.isNotBlank() } ?: packageName
+
+    /** [packageName] sent a message. */
+    fun used(packageName: String) {
+        if (apps.used(packageName)) {
+            BleRuntime.onAppsChanged()
+        }
+    }
+
+    /** The app was uninstalled: it leaves the list and our CAPS. */
+    fun onPackageRemoved(packageName: String) {
+        certHashes.remove(packageName)
+        // The queue counter stays: its sends still in flight release their slots.
+        receivers[packageName]?.close()
+        val removed = apps.remove(packageName)
+        if (removed) {
+            Log.i(TAG, "$packageName was uninstalled; unregistered it")
+        }
+        refreshCaps()
+        if (removed) {
+            BleRuntime.onAppsChanged()
+        }
+    }
+
+    /** Installed or updated: its certificate, label, or RECEIVE service may differ now. */
+    private fun onPackageChanged(packageName: String) {
+        certHashes.remove(packageName)
+        val declaresReceiver = receiveServices(packageName).isNotEmpty()
+        val changed = if (declaresReceiver || apps[packageName] != null) registerPackage(packageName) else false
+        refreshCaps()
+        if (changed) {
+            BleRuntime.onAppsChanged()
+        }
     }
 
     /** An app's identity, or null if it isn't installed (or isn't visible to us). */
@@ -105,19 +187,45 @@ class AppRegistry(private val context: Context) : AppRouter {
 
     fun register(listener: IBleListener, packages: Set<String>) {
         val binder = listener.asBinder()
-        unregister(binder)
+        unregister(binder, notify = false)
         val death = IBinder.DeathRecipient { handler.post { unregister(binder) } }
         if (runCatching { binder.linkToDeath(death, 0) }.isFailure) {
             return
         }
         listeners[binder] = Listener(listener, packages, death)
+        packages.forEach(::registerPackage)
         refreshCaps()
+        BleRuntime.onAppsChanged()
     }
 
-    fun unregister(binder: IBinder) {
+    fun unregister(binder: IBinder) = unregister(binder, notify = true)
+
+    private fun unregister(binder: IBinder, notify: Boolean) {
         val removed = listeners.remove(binder) ?: return
         runCatching { binder.unlinkToDeath(removed.death, 0) }
         refreshCaps()
+        if (notify) {
+            BleRuntime.onAppsChanged()
+        }
+    }
+
+    /** The `apps` event for Dart: the registered apps and whether each can receive now. */
+    fun appsEvent(): Map<String, Any?> {
+        val listening = listeners.values.flatMap { it.packages }.toSet()
+        val withService = receiveServices().map { it.packageName }.toSet()
+        return mapOf(
+            "type" to "apps",
+            "apps" to apps.list().map { app ->
+                mapOf(
+                    "packageName" to app.packageName,
+                    "label" to app.label,
+                    "listening" to (app.packageName in listening),
+                    "receiveService" to (app.packageName in withService),
+                    "registeredAt" to app.registeredAt,
+                    "lastUsedAt" to app.lastUsedAt
+                )
+            }
+        )
     }
 
     override fun localCaps(): Capabilities = caps
@@ -132,8 +240,8 @@ class AppRegistry(private val context: Context) : AppRouter {
 
     private fun computeCaps(): Capabilities {
         val receiving = listeners.values.flatMap { it.packages }.toSet() + receiveServices().map { it.packageName }
-        val apps = receiving.filter { it != context.packageName }.sorted().mapNotNull(::identity)
-        return Capabilities(emptyList(), apps)
+        val identities = receiving.filter { it != context.packageName }.sorted().mapNotNull(::identity)
+        return Capabilities(emptyList(), identities)
     }
 
     private fun receiveServices(packageName: String? = null): List<ComponentName> {
@@ -261,7 +369,7 @@ class AppRegistry(private val context: Context) : AppRouter {
 
         override fun onNullBinding(name: ComponentName) = close()
 
-        private fun close() {
+        fun close() {
             handler.removeCallbacks(unbind)
             handler.removeCallbacks(connectTimeout)
             if (bound) {
@@ -281,5 +389,27 @@ class AppRegistry(private val context: Context) : AppRouter {
         const val MAX_QUEUED = 32
         private const val IDLE_UNBIND_MS = 10_000L
         private const val CONNECT_TIMEOUT_MS = 5_000L
+
+        private fun registeredApps(context: Context): RegisteredApps {
+            val prefs = context.getSharedPreferences(RegisteredApps.PREFS_NAME, Context.MODE_PRIVATE)
+            return RegisteredApps(
+                prefs.getString(RegisteredApps.PREF_APPS, null),
+                save = { prefs.edit().putString(RegisteredApps.PREF_APPS, it).apply() },
+                clock = System::currentTimeMillis
+            )
+        }
+
+        /**
+         * [packageName] was uninstalled (PACKAGE_FULLY_REMOVED, which Android also
+         * delivers to a stopped app). Without a running registry, only the saved list
+         * changes; the next start computes CAPS from it.
+         */
+        fun onUninstalled(context: Context, packageName: String) {
+            if (BleRuntime.initialized) {
+                BleRuntime.post { BleRuntime.registry.onPackageRemoved(packageName) }
+            } else if (registeredApps(context).remove(packageName)) {
+                Log.i(TAG, "$packageName was uninstalled; unregistered it")
+            }
+        }
     }
 }

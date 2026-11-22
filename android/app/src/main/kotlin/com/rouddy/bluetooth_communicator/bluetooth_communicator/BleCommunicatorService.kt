@@ -15,7 +15,6 @@ import com.rouddy.bluetooth_communicator.api.PeerInfo
 import com.rouddy.bluetooth_communicator.bluetooth_communicator.protocol.AppIdentity
 import com.rouddy.bluetooth_communicator.bluetooth_communicator.protocol.DeliveryStatus
 import com.rouddy.bluetooth_communicator.bluetooth_communicator.protocol.PeerId
-import java.util.concurrent.atomic.AtomicLong
 
 /**
  * The exported AIDL service (docs/protocol.md 11절). Open to any app without a
@@ -24,8 +23,6 @@ import java.util.concurrent.atomic.AtomicLong
  * main looper with the engine.
  */
 class BleCommunicatorService : Service() {
-    private val requestIds = AtomicLong()
-
     private val registry: AppRegistry
         get() = BleRuntime.registry
 
@@ -53,7 +50,9 @@ class BleCommunicatorService : Service() {
             ttlMillis: Long,
             callback: IBleSendCallback?
         ): Long {
-            val requestId = requestIds.incrementAndGet()
+            // Taken here, on the binder thread, so the caller has it before a reply can
+            // come (API v2); the engine sends under it.
+            val requestId = BleRuntime.store.nextMsgId()
             val report = { status: Int ->
                 try {
                     callback?.onResult(requestId, status)
@@ -79,7 +78,8 @@ class BleCommunicatorService : Service() {
                 return requestId
             }
             BleRuntime.post {
-                BleRuntime.engine.send(peer, path, data, replyTo, ttlMillis, identity) { status ->
+                registry.used(packageName)
+                BleRuntime.engine.send(peer, path, data, replyTo, ttlMillis, identity, msgId = requestId) { status ->
                     registry.releaseSlot(packageName)
                     report(status)
                 }

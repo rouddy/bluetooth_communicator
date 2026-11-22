@@ -13,7 +13,11 @@ import com.rouddy.bluetooth_communicator.api.PeerInfo;
  * may rarely arrive twice; filter by (peerId, msgId).
  */
 interface IBleCommunicator {
-    const int API_VERSION = 1;
+    /**
+     * 2: send() returns the message's msgId, which a reply to it carries as replyTo
+     * (1 returned a local request id).
+     */
+    const int API_VERSION = 2;
     const String SERVICE_PACKAGE = "com.rouddy.bluetooth_communicator.bluetooth_communicator";
     const String ACTION_BIND = "com.rouddy.bluetooth_communicator.action.BIND";
 
@@ -45,9 +49,14 @@ interface IBleCommunicator {
 
     /**
      * Sends data to path on peerId; path must be "<calling package>/...". replyTo is
-     * 0, or the msgId this answers (a reply isn't acknowledged). ttlMillis <= 0 means
-     * the default (30 s, at most 60 s). Returns this request's id, which onResult
-     * reports exactly once.
+     * 0, or the msgId this answers (a reply isn't acknowledged, and its onResult is OK
+     * once it's written to the link). ttlMillis <= 0 means the default (30 s, at most
+     * 60 s).
+     *
+     * Returns the message's msgId, never 0: onResult reports it exactly once, and the
+     * peer's reply to it (IBleListener.onMessage) carries it as replyTo. It's returned
+     * before the message goes out, so a reply can't arrive before it. A request that
+     * fails right away (DENIED, MALFORMED, BUSY) gets an id too.
      */
     long send(String peerId, String path, in byte[] data, long replyTo, long ttlMillis,
             IBleSendCallback callback);
