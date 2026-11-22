@@ -19,6 +19,8 @@
 //   how long it took; the peer's user approves it.
 // - MODE=receiveFile: approve the next file the peer sends, wait until it's received,
 //   print how long that took, and close the export screen.
+// CENTRAL=false turns scanning off on this phone, so the peer connects to it as
+// central (this phone is the peripheral; the default lets either side connect).
 // CLIP_TEXT puts that text into this phone's clipboard first, for the peer to take.
 // DEVICE_NAME (iOS) sets the name peers see. The phones must already be paired at the
 // OS level, or the system pairing dialogs need a person. LIVE_MINUTES keeps the app
@@ -42,6 +44,7 @@ const _liveMinutes = int.fromEnvironment('LIVE_MINUTES');
 const _clipText = String.fromEnvironment('CLIP_TEXT');
 const _expectClip = String.fromEnvironment('EXPECT_CLIP');
 const _fileSize = int.fromEnvironment('FILE_SIZE', defaultValue: 100000);
+const _central = bool.fromEnvironment('CENTRAL', defaultValue: true);
 
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
@@ -50,7 +53,7 @@ void main() {
     expect(_peerName.isNotEmpty || _mode == 'setup', isTrue, reason: 'Pass --dart-define=PEER_NAME=…');
     app.main();
     await pumpUntilFound(tester, find.text('기기 목록'));
-    await ensureBleModesEnabled(tester);
+    await ensureBleModesEnabled(tester, central: _central);
     if (_deviceName.isNotEmpty && app.BleAppController.canSetDeviceName) {
       await setDeviceName(tester, _deviceName);
     }
