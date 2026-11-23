@@ -229,23 +229,15 @@
 - 이쪽이 peripheral인 세션에서 상대 앱이 죽으면(Galaxy에서는 Bluetooth 연결이 그대로 남음), 이쪽 링크는 상대가 다시 연결해 올 때까지 "연결됨"으로 남습니다. 다시 시작한 상대 앱의 central이 꺼져 있으면, 이쪽도 살아 있는 링크가 있다고 보고 연결하지 않습니다.
 - 수정 방향: peripheral 링크도 주기적으로(또는 스캔에서 상대가 다시 보일 때) `/ping`으로 확인합니다.
 
-### 34. Android의 Bluetooth를 껐다 켜면 iPhone과의 연결이 한 번 더 끊김 `확인됨` (원인은 모름)
-- 처음 적은 "전송이 868KB에서 멈추고 회복하지 못함"은 틀렸습니다. 그 전송은 몇 분 뒤 끝나 있었고(파일 1MB, 체크섬 일치), 2026-11-23에 같은 절차를 네 번 더 해서 모두 끝났습니다. 남은 문제는 끊김이 한 번 더 생기는 것입니다.
-- 재현(Fold5 ↔ AlgorigoSE, iPhone central 켬): Fold5 → iPhone 1MB 전송 중 Fold5의 Bluetooth를 껐다 켭니다. iPhone이 먼저 central로 다시 연결되면 거의 매번 생깁니다(세 번 중 세 번). Fold5가 먼저 central로 붙으면 링크가 하나뿐이라 깨끗하게 복구됩니다.
-- 일어나는 일
-  1. iPhone이 central로 다시 연결합니다. 이 연결은 MTU 교환 전이라 20바이트로 시작하고, Fold5가 client로 붙으며 MTU 교환(517)과 Data Length 변경(251)을 하면 커집니다(35번).
-  2. 그 직후 iPhone이 보낸 write 하나가 Fold5에 도착하지 않습니다. Fold5 스택의 `gatt_sr_enqueue_cmd`와 앱의 `onCharacteristicWriteRequest` 모두 그 뒤로 iPhone의 요청을 받지 못했고, iPhone에는 `didWriteValueFor`가 오지 않았습니다.
-  3. 그 write가 `/ping`이면 양쪽이 iPhone-central 링크를 죽었다고 판단하고 Fold5-central 링크를 남깁니다.
-  4. 정확히 30초 뒤(ATT 트랜잭션 제한 시간) iPhone이 연결을 끊고(`REMOTE_USER_TERMINATED_CONNECTION` 0x13, iPhone에는 "no error"), 남긴 링크도 함께 끊깁니다. 다시 연결되면 전송이 이어집니다.
-- 틀린 것으로 확인한 가설
-  - "iPhone이 client 링크를 닫으면(`cancelPeripheralConnection`) 공유 연결이 끊긴다": 연결을 닫지 않고 남겨 둬도(Android `idleClients`처럼) 똑같이 30초 뒤에 끊겼습니다. 닫았을 때도 끊긴 시각은 닫은 시각이 아니라 write로부터 30초였습니다.
-  - "MTU가 커진 뒤 처음 보내는 큰 write가 버려진다": 크기를 키우는 코드가 없던 2026-11-22에도 20바이트 write가 똑같이 막혔습니다.
-- 전송 없이 같은 재연결을 하면 iPhone의 `/ping`이 0.12초 만에 돌아오고 끊김도 없었습니다(2026-11-23). 전송 부하가 있을 때만 생깁니다. ping이 2.2초 만에 돌아와 iPhone-central 링크가 남은 때에도, 그 뒤의 다른 write가 막혀 30초 뒤 끊겼습니다.
-- HCI 로그는 Fold5에서 얻지 못했습니다. 개발자 옵션의 "블루투스 HCI 스누프 로그 사용"과 "snoop log socket"을 켜면 `persist.bluetooth.btsnooplogmode=full`, `btsnoopsocket.enabled=true`가 되지만:
-  - 파일은 `/data/misc/bluetooth/logs`에 쌓이는데 adb로 읽을 수 없고, `adb bugreport`와 SysDump(`*#9900#` → Copy to sdcard, `/data/log`만 복사하며 `/data/log/bt`는 비어 있음)에도 들어가지 않습니다.
-  - 소켓(localhost:8872)은 Bluetooth를 여러 번 다시 켜도 열리지 않았습니다(`/proc/net/tcp`에 없음). 사용자 빌드라서인 것으로 보입니다.
-  - `dumpsys bluetooth_manager`의 `BTSNOOP_LOG_SUMMARY`는 최근 2분의 이벤트만 담고 ACL이 없으며, `PickENH`/`QCENH`는 Qualcomm 컨트롤러 진단 로그(ACL handle 0xEDC)입니다.
-- 다음 단계: iPhone 쪽에서 잡습니다. Apple 개발자 사이트의 Bluetooth 로깅 프로파일을 iPhone에 설치하고, Xcode Additional Tools의 PacketLogger로 연결된 iPhone의 HCI를 실시간으로 받으면서 재현하면, 막힌 write가 iPhone에서 나갔는지와 그 직전의 LL 절차(Data Length 변경 등)를 볼 수 있습니다. 다른 방법은 스누프 파일을 읽을 수 있는 Android 기기(userdebug 빌드 등)로 재현하는 것입니다.
+### 34. Android의 Bluetooth를 껐다 켜면 iPhone과의 연결이 한 번 더 끊김 `확인됨` ✅ 해결
+- 원인(2026-11-23, iPhone HCI 로그와 Fold5 스택 로그로 확인): 재연결 직후 링크가 20바이트 프레임(MTU 교환 전)으로 올라오고, 세션이 맺어지자 Fold5가 재전송할 파일 조각을 20바이트로 잘랐습니다(16 KiB 조각 하나가 820개 notification). Android는 notification을 큐에 넣자마자 `onNotificationSent`를 주므로 앱이 L2CAP 큐(한도 200)를 금방 넘겼고, 혼잡한 동안 Fold5 스택은 iPhone의 Write Request에 대한 응답을 버렸습니다.
+  - Fold5: `L2CA_SendFixedChnlData: Link congestion CID: 0x0004 xmit_hold_q.count: 103 buff_quota: 200` → `attp_send_msg_to_l2cap: failed to write data to L2CAP` → `BTA_GATTS_SendRsp: Sending response failed`. 앱의 `sendResponse`는 `true`를 돌려받았습니다.
+  - iPhone(Bluetooth 로깅 프로파일 + sysdiagnose의 `bluetoothd-hci-*.pklg`): Write Request를 보냈고 컨트롤러가 전송 완료(Number of Completed Packets)를 보고했지만 Write Response는 오지 않았습니다. 30초 뒤(ATT 트랜잭션 제한 시간) iPhone 호스트가 연결을 끊었습니다(reason 0x16, 앱에는 "no error").
+  - 그 연결의 링크 계층 central은 Fold5였습니다(iPhone 역할 peripheral). iPhone의 central 앱 연결은 Fold5가 맺은 연결 위에 올라간 것이었습니다.
+- 해결: 두 엔진이 프레임이 20바이트인 새 링크에서 bulk record(파일 조각)를 최대 3초까지 미루고(`BULK_HOLD_MS`), `setMaxFrameSize`로 커지면 바로 보냅니다(docs/protocol.md 9절). 테스트: 두 엔진의 `a new link at the default MTU holds bulk records until its frames grow`, `a link that keeps the default MTU sends bulk records after the hold`.
+- 확인: 같은 재현을 세 번 해서 Fold5의 혼잡 로그와 30초 뒤 끊김이 한 번도 없었습니다(수정 전에는 다섯 번 중 다섯 번). 받은 1MB 파일의 체크섬이 일치했습니다. 재시작 없는 300KB 전송도 전과 같은 속도였습니다.
+- 남은 것: 재연결 직후 두 링크가 생기면 iPhone-central 링크의 `/ping`이 여전히 3초를 넘겨 그 링크가 교체됩니다(세 번 모두). 혼잡은 아니고, Fold5 L2CAP 큐에 먼저 들어간 파일 조각(최대 약 96개 × 512바이트) 뒤에 ACK가 줄을 서서 늦는 것으로 보입니다. 교체된 뒤에는 Fold5-central 링크(write, 약 7KB/s)로 세션과 전송이 이어집니다. 엔진의 우선순위는 OS 큐에 넘기기 전에만 통하므로, 줄이려면 Android가 한 번에 큐에 넣는 notification 수를 제한해야 합니다.
+- 조사 과정에서 틀린 것으로 확인한 가설: iPhone이 client 연결을 닫아서 끊긴다(남겨 둬도 똑같이 끊김), MTU가 커진 뒤 큰 write가 버려진다(20바이트 write도 막힘). Fold5의 HCI 스누프는 사용자 빌드라 꺼낼 수 없었습니다(파일은 `/data/misc/bluetooth/logs`, 소켓은 열리지 않음).
 
 ### 35. 재연결 직후 링크가 20바이트 프레임으로 맺어짐 `확인됨` ✅ 해결
 - 해결(2026-11-23): 링크를 올린 뒤에 MTU가 커지면 프레임도 키웁니다.
