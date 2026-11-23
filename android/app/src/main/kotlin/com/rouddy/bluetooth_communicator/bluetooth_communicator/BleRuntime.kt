@@ -31,6 +31,7 @@ import com.rouddy.bluetooth_communicator.bluetooth_communicator.protocol.Platfor
 import com.rouddy.bluetooth_communicator.bluetooth_communicator.protocol.ProtocolEngine
 import com.rouddy.bluetooth_communicator.bluetooth_communicator.protocol.RejectReason
 import com.rouddy.bluetooth_communicator.bluetooth_communicator.protocol.Scheduler
+import com.rouddy.bluetooth_communicator.bluetooth_communicator.protocol.TcpMessage
 
 /** The GATT side of the engine; [BluetoothBackgroundService] while it runs. */
 interface BleTransport {
@@ -107,6 +108,7 @@ object BleRuntime : EngineHost {
         ClipboardShare.init(this.context)
         MediaControl.init(this.context)
         FileShare.init(this.context, engine, scheduler)
+        TcpLinks.init(this.context, engine)
         this.context.getSystemService(NotificationManager::class.java).createNotificationChannel(
             NotificationChannel(PAIRING_CHANNEL_ID, "기기 연결 요청", NotificationManager.IMPORTANCE_HIGH)
         )
@@ -151,6 +153,10 @@ object BleRuntime : EngineHost {
         transport?.closeLink(linkId)
     }
 
+    override fun writeTcpFrame(linkId: Int, frame: ByteArray) = TcpLinks.writeFrame(linkId, frame)
+
+    override fun closeTcp(linkId: Int) = TcpLinks.closeTcp(linkId)
+
     override fun localIdentity(): LocalIdentity {
         // Samsung and others let the user name the phone; that's what HELLO shows.
         val name = Settings.Global.getString(context.contentResolver, Settings.Global.DEVICE_NAME)
@@ -164,7 +170,7 @@ object BleRuntime : EngineHost {
 
     override fun localCaps(): Capabilities =
         Capabilities(
-            listOf(ClipboardMessage.PATH, FileMessage.PATH, MediaMessage.PATH),
+            listOf(ClipboardMessage.PATH, FileMessage.PATH, MediaMessage.PATH, TcpMessage.PATH),
             router?.localCaps()?.apps ?: emptyList()
         )
 
@@ -186,6 +192,11 @@ object BleRuntime : EngineHost {
                 done(DeliveryStatus.OK)
             }
             data.path == MediaMessage.PATH -> MediaControl.onRequest(peerId, data, done)
+            data.path == TcpMessage.PATH && data.isReply -> {
+                TcpLinks.onReply(peerId, data)
+                done(DeliveryStatus.OK)
+            }
+            data.path == TcpMessage.PATH -> TcpLinks.onRequest(peerId, data, done)
             data.path.startsWith("/") -> done(DeliveryStatus.UNSUPPORTED)
             target == null -> done(DeliveryStatus.NO_RECEIVER)
             else -> target.deliver(peerId, data, done)
@@ -203,6 +214,8 @@ object BleRuntime : EngineHost {
             is EngineEvent.PairingRequest -> notifyPairing(event)
             is EngineEvent.PairingResult -> cancelPairingNotification(event.deviceId)
             is EngineEvent.PeerUnpaired -> FileShare.transfers.peerRemoved(event.peerId)
+            is EngineEvent.Connected -> TcpLinks.onSessionStarted(event.peerId)
+            is EngineEvent.Disconnected -> TcpLinks.onSessionsChanged()
             else -> Unit
         }
         transport?.onEngineEvent(event)
@@ -279,7 +292,8 @@ object BleRuntime : EngineHost {
                     PeerState.BAD_MAC -> "badMac"
                     PeerState.UNPAIRED_BY_PEER -> "unpairedByPeer"
                 },
-                "connected" to summary.connected
+                "connected" to summary.connected,
+                "tcp" to summary.tcp
             )
         }
     )

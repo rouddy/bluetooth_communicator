@@ -479,11 +479,8 @@ class DeviceListPage extends StatelessWidget {
   }
 
   Widget _buildKnownTile(BuildContext context, BleDevice device) {
-    final isConnected = controller.connectedDeviceIds.contains(device.identifier);
     return ListTile(
-      leading: Icon(
-        isConnected ? Icons.bluetooth_connected : Icons.bluetooth_disabled,
-      ),
+      leading: Icon(controller.linkIcon(device.identifier)),
       title: Text(device.name.isEmpty ? '(Unknown)' : device.name),
       subtitle: Text(
         '${controller.linkLabel(device.identifier)} · ${device.identifier}',
@@ -940,9 +937,7 @@ class DeviceControlPage extends StatelessWidget {
       body: ListView(
         children: [
           ListTile(
-            leading: Icon(
-              isConnected ? Icons.bluetooth_connected : Icons.bluetooth_disabled,
-            ),
+            leading: Icon(controller.linkIcon(device.identifier)),
             title: Text(controller.linkLabel(device.identifier)),
             subtitle: Text(device.identifier),
             trailing: _linkButton(),
@@ -1522,7 +1517,18 @@ class BleAppController extends ChangeNotifier {
     return LinkState.disconnected;
   }
 
+  /// Whether the session with [deviceId] runs over TCP on Wi-Fi rather than Bluetooth.
+  bool isOnWifi(String deviceId) =>
+      connectedDeviceIds.contains(deviceId) && (peerFor(deviceId)?.tcp ?? false);
+
+  IconData linkIcon(String deviceId) => isOnWifi(deviceId)
+      ? Icons.wifi
+      : connectedDeviceIds.contains(deviceId)
+      ? Icons.bluetooth_connected
+      : Icons.bluetooth_disabled;
+
   String linkLabel(String deviceId) => switch (linkStateFor(deviceId)) {
+    LinkState.connected when isOnWifi(deviceId) => '연결됨 · Wi-Fi',
     LinkState.connected => '연결됨',
     LinkState.awaitingApproval => '승인 대기 중…',
     LinkState.bonding => '페어링 중…',
@@ -1913,10 +1919,14 @@ class BleDevice {
     this.peerId,
     this.state,
     this.platform,
+    this.tcp = false,
   });
 
   final String identifier;
   final String name;
+
+  /// Whether the session's messages go over TCP on Wi-Fi (`/tcp`, docs/protocol.md 10절).
+  final bool tcp;
 
   /// What the peer announced in HELLO: 1 Android, 2 iOS (docs/protocol.md 6.2).
   final int? platform;
@@ -1937,6 +1947,7 @@ class BleDevice {
       peerId: map['peerId'] as String?,
       state: PeerState.values.asNameMap()[map['state']],
       platform: map['platform'] as int?,
+      tcp: map['tcp'] == true,
     );
   }
 }

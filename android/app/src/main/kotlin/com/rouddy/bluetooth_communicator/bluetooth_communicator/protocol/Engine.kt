@@ -101,6 +101,16 @@ interface EngineHost {
     /** Drops the link. The engine has already forgotten it. */
     fun closeLink(linkId: Int)
 
+    /**
+     * Writes one frame on [linkId]'s TCP connection (`/tcp`, 10절); answer with
+     * [ProtocolEngine.tcpFrameWritten]. Only called between [ProtocolEngine.tcpUp]
+     * and the connection's end, so a host without TCP never gets it.
+     */
+    fun writeTcpFrame(linkId: Int, frame: ByteArray) {}
+
+    /** [linkId]'s session ended while it had a TCP connection; close the connection. */
+    fun closeTcp(linkId: Int) {}
+
     fun localIdentity(): LocalIdentity
 
     /** Whether the user can be asked to approve a pairing right now. */
@@ -119,8 +129,13 @@ interface EngineHost {
 data class PeerSummary(
     val peer: StoredPeer,
     val connected: Boolean,
-    val caps: Capabilities?
+    val caps: Capabilities?,
+    /** Whether the session's records go over TCP (`/tcp`). */
+    val tcp: Boolean = false
 )
+
+/** An established session: which link carries it, and our role on it. */
+data class SessionInfo(val linkId: Int, val role: Role, val deviceId: String, val peerId: PeerId, val tcp: Boolean)
 
 /** The derivations of 6.3 and 6.4. */
 object Derivation {
@@ -266,6 +281,9 @@ class ProtocolEngine(
         var frames: List<ByteArray>? = null
         var next = 0
         var tid = -1
+
+        /** Whether it went over the link's TCP connection; decided when it starts. */
+        var viaTcp = false
     }
 
     private inner class Link(
@@ -276,6 +294,12 @@ class ProtocolEngine(
         var maxFrameSize: Int
     ) {
         val reassembler = FrameReassembler(MAX_MESSAGE_SIZE)
+
+        /** Whether the session has a TCP connection (`/tcp`); new records then go over it. */
+        var tcp = false
+
+        /** The TCP connection's own buffers: a record's frames all use one carrier (4절). */
+        val tcpReassembler = FrameReassembler(MAX_MESSAGE_SIZE)
         private val upAt = scheduler.now()
         private var bulkHold: Cancellable? = null
         var phase = Phase.AWAIT_HELLO
@@ -319,8 +343,15 @@ class ProtocolEngine(
             pump()
         }
 
-        fun frameWritten(success: Boolean) {
+        /**
+         * The write of the current frame ended. A TCP write that ends after its
+         * connection went away (and the record moved to Bluetooth) is ignored.
+         */
+        fun frameWritten(success: Boolean, viaTcp: Boolean) {
             val record = writing ?: return
+            if (record.viaTcp != viaTcp) {
+                return
+            }
             writing = null
             if (!success) {
                 queues[record.priority].remove(record)
@@ -337,8 +368,29 @@ class ProtocolEngine(
             pump()
         }
 
-        /** The frame size grew: a held bulk record may start now. */
+        /** The frame size grew, or TCP came up: a held bulk record may start now. */
         fun resume() = pump()
+
+        /**
+         * The TCP connection went away: records that started on it but aren't written
+         * yet go over Bluetooth instead, with the same bytes. If the connection did
+         * deliver one, the peer's replay window drops the second copy (same counter).
+         */
+        fun moveTcpRecordsToBluetooth() {
+            if (writing?.viaTcp == true) {
+                writing = null
+            }
+            queues.forEach { queue ->
+                queue.filter { it.viaTcp && it.frames != null }.forEach { record ->
+                    tidsInUse[record.tid] = false
+                    record.frames = null
+                    record.next = 0
+                    record.tid = -1
+                    record.viaTcp = false
+                }
+            }
+            pump()
+        }
 
         fun failAll() {
             bulkHold?.cancel()
@@ -373,7 +425,7 @@ class ProtocolEngine(
                 return
             }
             val record = queues.firstOrNull { it.isNotEmpty() }?.first() ?: return
-            if (record.frames == null && record.priority == PRIORITY_BULK && maxFrameSize <= SMALL_FRAME_SIZE) {
+            if (record.frames == null && record.priority == PRIORITY_BULK && !tcp && maxFrameSize <= SMALL_FRAME_SIZE) {
                 val wait = upAt + BULK_HOLD_MS - scheduler.now()
                 if (wait > 0) {
                     if (bulkHold == null) {
@@ -387,10 +439,17 @@ class ProtocolEngine(
             }
             if (record.frames == null) {
                 record.tid = allocateTid()
-                record.frames = Frames.split(record.bytes, record.tid, maxFrameSize)
+                // On TCP a record goes whole, as one frame (TcpStream.FRAME_SIZE).
+                record.viaTcp = tcp
+                record.frames = Frames.split(record.bytes, record.tid, if (tcp) TcpStream.FRAME_SIZE else maxFrameSize)
             }
             writing = record
-            host.writeFrame(id, record.frames!![record.next])
+            val frame = record.frames!![record.next]
+            if (record.viaTcp) {
+                host.writeTcpFrame(id, frame)
+            } else {
+                host.writeFrame(id, frame)
+            }
         }
 
         private fun allocateTid(): Int {
@@ -419,6 +478,9 @@ class ProtocolEngine(
         var done = false
         var ttlTimer: Cancellable? = null
         var ackTimer: Cancellable? = null
+
+        /** The record that carries it this time, to tell which carrier it went on. */
+        var record: OutgoingRecord? = null
     }
 
     /** Delivery state per peer; outlives links so sends can wait for a reconnect. */
@@ -496,12 +558,97 @@ class ProtocolEngine(
     }
 
     fun frameWritten(linkId: Int, success: Boolean) {
-        links[linkId]?.frameWritten(success)
+        links[linkId]?.frameWritten(success, viaTcp = false)
     }
 
     /** The link went away (disconnect, unsubscribe, Bluetooth off). */
     fun linkDown(linkId: Int) {
         links.remove(linkId)?.let(::teardown)
+    }
+
+    // ---------------------------------------------------------------- TCP (`/tcp`, 10절)
+
+    /**
+     * [linkId]'s session got a TCP connection: records that start from now on go over
+     * it, whole. The handshake stays on Bluetooth, and so does the link: the session
+     * still ends with the GATT link. Returns false if the link has no session (the
+     * host then closes the connection).
+     */
+    fun tcpUp(linkId: Int): Boolean {
+        val link = links[linkId] ?: return false
+        if (link.closed || link.phase != Phase.ESTABLISHED) {
+            return false
+        }
+        if (!link.tcp) {
+            link.tcp = true
+            link.tcpReassembler.reset()
+            host.log("Link $linkId to ${link.deviceId} now sends over TCP")
+            host.onEvent(EngineEvent.PeersChanged)
+            link.resume()
+        }
+        return true
+    }
+
+    /** [linkId]'s TCP connection ended; what it may have swallowed goes again over Bluetooth. */
+    fun tcpDown(linkId: Int) {
+        val link = links[linkId] ?: return
+        if (!link.tcp) {
+            return
+        }
+        host.log("Link $linkId to ${link.deviceId} is back on Bluetooth")
+        dropTcp(link)
+        host.onEvent(EngineEvent.PeersChanged)
+    }
+
+    fun tcpFrameReceived(linkId: Int, frame: ByteArray) {
+        val link = links[linkId] ?: return
+        if (!link.tcp) {
+            return
+        }
+        val record = link.tcpReassembler.accept(frame) ?: return
+        onRecord(link, record, viaTcp = true)
+    }
+
+    fun tcpFrameWritten(linkId: Int, success: Boolean) {
+        links[linkId]?.frameWritten(success, viaTcp = true)
+    }
+
+    /** The established session with [peerId], if any. */
+    fun session(peerId: PeerId): SessionInfo? {
+        val link = channels[peerId]?.link?.takeIf { it.phase == Phase.ESTABLISHED && !it.closed } ?: return null
+        return SessionInfo(link.id, link.role, link.deviceId, peerId, link.tcp)
+    }
+
+    /**
+     * Leaves TCP: unwritten records move to Bluetooth, and messages it may have
+     * swallowed after their write (sent, but not acknowledged) are sent again; the
+     * peer's dedup (9절) keeps a second copy from being delivered twice. The peer's
+     * ACKs it swallowed come again the same way, from the peer's own [tcpDown].
+     */
+    private fun dropTcp(link: Link) {
+        link.tcp = false
+        link.tcpReassembler.reset()
+        val channel = link.peerId?.let { channels[it] }?.takeIf { it.link === link }
+        if (channel != null) {
+            val lost = channel.inFlight.values.filter { it.written && it.record?.viaTcp == true }
+            lost.forEach {
+                channel.inFlight.remove(it.msgId)
+                it.ackTimer?.cancel()
+                it.ackTimer = null
+                it.record = null
+            }
+            lost.asReversed().forEach { channel.outbox.addFirst(it) }
+        }
+        link.moveTcpRecordsToBluetooth()
+        if (channel != null && link.phase == Phase.ESTABLISHED) {
+            // A `/ping` waiting for its ACK would otherwise count the link as dead.
+            link.probes.keys.toList().forEach { msgId ->
+                sendSealed(link, Envelope.Data(msgId, Envelope.FLAG_ACK_REQ, PING_PATH, 0, ByteArray(0)), PRIORITY_CONTROL)
+            }
+            // A CAPS update may have been lost too; it's small.
+            sendCaps(channel)
+            pumpChannel(channel)
+        }
     }
 
     /**
@@ -535,7 +682,8 @@ class ProtocolEngine(
 
     fun peerSummaries(): List<PeerSummary> = store.peers().map { peer ->
         val channel = channels[peer.peerId]
-        PeerSummary(peer, channel?.link?.phase == Phase.ESTABLISHED, channel?.caps)
+        val established = channel?.link?.phase == Phase.ESTABLISHED
+        PeerSummary(peer, established, channel?.caps, tcp = established && channel?.link?.tcp == true)
     }
 
     /** The last CAPS [peerId] sent (kept across its sessions), or null if none yet. */
@@ -580,12 +728,19 @@ class ProtocolEngine(
         }
     }
 
-    private fun sendRecord(link: Link, bytes: ByteArray, priority: Int, onWritten: ((Boolean) -> Unit)? = null) {
+    private fun sendRecord(
+        link: Link,
+        bytes: ByteArray,
+        priority: Int,
+        onWritten: ((Boolean) -> Unit)? = null
+    ): OutgoingRecord? {
         if (link.closed) {
             onWritten?.invoke(false)
-            return
+            return null
         }
-        link.enqueue(OutgoingRecord(bytes, priority, onWritten))
+        val record = OutgoingRecord(bytes, priority, onWritten)
+        link.enqueue(record)
+        return record
     }
 
     // ---------------------------------------------------------------- handshake
@@ -645,7 +800,7 @@ class ProtocolEngine(
         }
     }
 
-    private fun onRecord(link: Link, bytes: ByteArray) {
+    private fun onRecord(link: Link, bytes: ByteArray, viaTcp: Boolean = false) {
         if (link.closed) {
             return
         }
@@ -653,6 +808,11 @@ class ProtocolEngine(
             Record.decode(bytes)
         } catch (e: MalformedException) {
             host.log("Dropped a malformed record from ${link.deviceId}: ${e.message}")
+            return
+        }
+        if (viaTcp && record !is Record.Sealed) {
+            // Handshakes stay on Bluetooth; anyone on the Wi-Fi could send a HELLO.
+            host.log("Dropped a ${record.javaClass.simpleName} that came over TCP from ${link.deviceId}")
             return
         }
         when (record) {
@@ -1176,6 +1336,13 @@ class ProtocolEngine(
 
     /** Forgets [link]'s session; unacknowledged messages wait for the next one. */
     private fun endSession(link: Link) {
+        if (link.tcp) {
+            // The connection belongs to the session (its records are sealed with it).
+            link.tcp = false
+            link.tcpReassembler.reset()
+            link.moveTcpRecordsToBluetooth()
+            host.closeTcp(link.id)
+        }
         link.session ?: return
         link.session = null
         val channel = link.peerId?.let { channels[it] } ?: return
@@ -1196,11 +1363,16 @@ class ProtocolEngine(
 
     private fun channel(peerId: PeerId) = channels.getOrPut(peerId) { PeerChannel(peerId) }
 
-    private fun sendSealed(link: Link, envelope: Envelope, priority: Int, onWritten: ((Boolean) -> Unit)? = null) {
+    private fun sendSealed(
+        link: Link,
+        envelope: Envelope,
+        priority: Int,
+        onWritten: ((Boolean) -> Unit)? = null
+    ): OutgoingRecord? {
         val session = link.session
         if (session == null || link.closed) {
             onWritten?.invoke(false)
-            return
+            return null
         }
         if (session.sendCounter > MAX_COUNTER) {
             // 5절: the counter can't wrap; a central starts a new session.
@@ -1208,12 +1380,12 @@ class ProtocolEngine(
                 close(link)
             }
             onWritten?.invoke(false)
-            return
+            return null
         }
         val counter = session.sendCounter++
         val header = Record.sealedHeader(counter)
         val body = Crypto.seal(session.sendKey, counter, header, Envelope.encode(envelope))
-        sendRecord(link, Record.encode(Record.Sealed(counter, body)), priority, onWritten)
+        return sendRecord(link, Record.encode(Record.Sealed(counter, body)), priority, onWritten)
     }
 
     private fun onSealed(link: Link, record: Record.Sealed) {
@@ -1395,7 +1567,7 @@ class ProtocolEngine(
             }
             channel.outbox.removeFirst()
             channel.inFlight[next.msgId] = next
-            sendSealed(link, next.envelope, next.priority) { written -> onOutgoingWritten(channel, next, written) }
+            next.record = sendSealed(link, next.envelope, next.priority) { written -> onOutgoingWritten(channel, next, written) }
         }
     }
 
