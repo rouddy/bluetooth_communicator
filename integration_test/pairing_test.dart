@@ -21,6 +21,9 @@
 //   print how long that took, and close the export screen.
 // - MODE=media: on the peer's page, ask whether it's playing, press play/pause twice,
 //   and print the state after each answer (the peer is an Android phone with a player).
+// - MODE=settings: check the settings page's permission tiles (TODO 22: on iOS no
+//   알림 설정 열기, and the granted 권한 tile does nothing when tapped), and that
+//   starting the app reported no advertising error.
 // CENTRAL=false turns scanning off on this phone, so the peer connects to it as
 // central (this phone is the peripheral; the default lets either side connect).
 // CLIP_TEXT puts that text into this phone's clipboard first, for the peer to take.
@@ -52,7 +55,7 @@ void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
   testWidgets('pairs with $_peerName ($_mode)', (tester) async {
-    expect(_peerName.isNotEmpty || _mode == 'setup', isTrue, reason: 'Pass --dart-define=PEER_NAME=…');
+    expect(_peerName.isNotEmpty || _mode == 'setup' || _mode == 'settings', isTrue, reason: 'Pass --dart-define=PEER_NAME=…');
     app.main();
     await pumpUntilFound(tester, find.text('기기 목록'));
     await ensureBleModesEnabled(tester, central: _central);
@@ -64,6 +67,20 @@ void main() {
       await Clipboard.setData(const ClipboardData(text: _clipText));
     }
     if (_mode == 'setup') {
+      return stayLive(tester);
+    }
+    if (_mode == 'settings') {
+      await tester.tap(find.byIcon(Icons.settings));
+      await tester.pumpAndSettle();
+      final granted = find.widgetWithText(ListTile, 'Bluetooth 권한 허용됨');
+      expect(granted, findsOneWidget);
+      expect(find.text('알림 설정 열기'), findsNothing);
+      // Launching starts advertising from two places; only one start may go out.
+      expect(find.textContaining('Advertising failed'), findsNothing);
+      await tester.tap(granted);
+      await tester.pumpAndSettle();
+      expect(find.text('설정'), findsOneWidget);
+      debugPrint('[settings] 권한 tile shown and inert; 알림 설정 열기 absent');
       return stayLive(tester);
     }
     final peer = find.textContaining(_peerName);

@@ -232,6 +232,11 @@ final class IOSBleBackgroundManager: NSObject, FlutterStreamHandler, EngineHost 
   // What's reported in `status`. Tracked from delegate callbacks rather than read off
   // the managers: they're lazy, and touching them early shows the Bluetooth prompt.
   private var isAdvertising = false
+  // A start is on its way (startAdvertising until didStartAdvertising). isAdvertising
+  // only turns true in that callback, so without this the launch's restoreState and
+  // Dart's setAdvertisingEnabled both started it, and the second failed with
+  // "Advertising has already started".
+  private var advertisingStarting = false
   private var isScanning = false
   private var bluetoothOn = true
 
@@ -281,6 +286,7 @@ final class IOSBleBackgroundManager: NSObject, FlutterStreamHandler, EngineHost 
     } else {
       peripheralManager.stopAdvertising()
       isAdvertising = false
+      advertisingStarting = false
       peripheralManager.removeAllServices()
       resetPeripheralRole()
       emitStatus()
@@ -320,6 +326,7 @@ final class IOSBleBackgroundManager: NSObject, FlutterStreamHandler, EngineHost 
     if isAdvertising {
       peripheralManager.stopAdvertising()
       isAdvertising = false
+      advertisingStarting = false
       startAdvertisingIfPossible()
     }
   }
@@ -896,7 +903,16 @@ final class IOSBleBackgroundManager: NSObject, FlutterStreamHandler, EngineHost 
       addFrameServiceIfNeeded()
       return
     }
-    guard !peripheralManager.isAdvertising else { return }
+    if peripheralManager.isAdvertising {
+      // State restoration hands the manager back still advertising.
+      if !isAdvertising {
+        isAdvertising = true
+        emitStatus()
+      }
+      return
+    }
+    guard !advertisingStarting else { return }
+    advertisingStarting = true
     peripheralManager.startAdvertising([
       CBAdvertisementDataServiceUUIDsKey: [serviceUUID],
       CBAdvertisementDataLocalNameKey: deviceName,
@@ -1092,6 +1108,7 @@ extension IOSBleBackgroundManager: CBPeripheralManagerDelegate {
       restoredCentrals.removeAll()
       resetPeripheralRole()
       isAdvertising = false
+      advertisingStarting = false
       bluetoothOn = false
       emitStatus()
     default:
@@ -1133,7 +1150,9 @@ extension IOSBleBackgroundManager: CBPeripheralManagerDelegate {
   }
 
   func peripheralManagerDidStartAdvertising(_ peripheral: CBPeripheralManager, error: Error?) {
-    if let error {
+    advertisingStarting = false
+    // Already advertising is what we wanted.
+    if let error, (error as? CBError)?.code != .alreadyAdvertising {
       emit(type: "error", payload: ["message": "Advertising failed: \(error.localizedDescription)"])
       return
     }
