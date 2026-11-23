@@ -168,6 +168,28 @@ final class EngineTests: XCTestCase {
     }
   }
 
+  func testAcksThatKeepComingDontHoldAMessageBack() {
+    network.maxFrameSize = 512
+    let connection = pair()
+    b.deliverStatus = nil
+    for i in 0..<ProtocolEngine.maxInFlight {
+      _ = a.send(to: b, Data("m\(i)".utf8))
+    }
+    settle(100)
+    XCTAssertEqual(b.heldDeliveries.count, ProtocolEngine.maxInFlight)
+    let before = connection.frames.count
+
+    // B acknowledges all of them at once and has a message of its own: in practice a
+    // central receiving a file, whose writes crawl, so an ACK was always waiting.
+    b.heldDeliveries.forEach { $0(DeliveryStatus.ok) }
+    let results = b.send(to: a, Data(count: 200))
+    settle()
+
+    let sizes = connection.frames.dropFirst(before).filter { $0.0 === b }.map { $0.1.count }
+    XCTAssertEqual(sizes.firstIndex { $0 > 200 }, 1)
+    XCTAssertEqual(results.value, [DeliveryStatus.ok])
+  }
+
   func testABulkMessageLetsOtherMessagesGoFirst() {
     pair()
 

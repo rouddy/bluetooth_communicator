@@ -102,6 +102,16 @@ class Phone(
 
     override fun closeLink(linkId: Int) = network.close(this, linkId)
 
+    override fun writeTcpFrame(linkId: Int, frame: ByteArray) = network.writeTcp(this, linkId, frame)
+
+    /** Links whose TCP connection the engine closed (its session ended). */
+    val closedTcp = mutableListOf<Int>()
+
+    override fun closeTcp(linkId: Int) {
+        closedTcp += linkId
+        network.closeTcp(this, linkId)
+    }
+
     override fun localIdentity() = LocalIdentity(name, Platform.ANDROID, "test")
 
     override fun localCaps() = caps
@@ -178,6 +188,31 @@ class Network(private val scheduler: FakeScheduler) {
             central.engine.linkDown(centralLink)
             peripheral.engine.linkDown(peripheralLink)
         }
+
+        /** The TCP connection of `/tcp`; its frames arrive at once. */
+        var tcpOpen = false
+
+        /** Frames each phone wrote on TCP, and on Bluetooth. */
+        val tcpFrames = mutableListOf<Pair<Phone, ByteArray>>()
+        val bleFrames = mutableListOf<Pair<Phone, ByteArray>>()
+
+        /** TCP frames for which this returns true vanish (their write still succeeds). */
+        var loseTcp: (from: Phone, frame: ByteArray) -> Boolean = { _, _ -> false }
+
+        fun tcpUp(): Pair<Boolean, Boolean> {
+            tcpOpen = true
+            return central.engine.tcpUp(centralLink) to peripheral.engine.tcpUp(peripheralLink)
+        }
+
+        /** The connection broke; both hosts notice. */
+        fun tcpDown() {
+            if (!tcpOpen) {
+                return
+            }
+            tcpOpen = false
+            central.engine.tcpDown(centralLink)
+            peripheral.engine.tcpDown(peripheralLink)
+        }
     }
 
     val connections = mutableListOf<Connection>()
@@ -186,6 +221,12 @@ class Network(private val scheduler: FakeScheduler) {
 
     /** Frames for which this returns true vanish (their write still succeeds). */
     var lose: (from: Phone, frame: ByteArray) -> Boolean = { _, _ -> false }
+
+    /**
+     * How much later than its write a frame arrives, like an Android peripheral's
+     * notification: reported sent once queued in the stack, delivered later.
+     */
+    var deliveryDelayMs = 0L
 
     fun phone(name: String, address: String, peerId: PeerId) = Phone(name, address, peerId, scheduler, this)
 
@@ -224,6 +265,7 @@ class Network(private val scheduler: FakeScheduler) {
 
     fun write(from: Phone, linkId: Int, frame: ByteArray) {
         val connection = find(from, linkId)
+        connection.bleFrames += from to frame
         scheduler.schedule(1) {
             // Like Android's GATT: an attribute value over 512 bytes is rejected.
             if (!connection.open || frame.size > Frames.MAX_FRAME_SIZE) {
@@ -244,12 +286,19 @@ class Network(private val scheduler: FakeScheduler) {
             } else {
                 1
             }
-            repeat(times) {
-                if (from === connection.central) {
-                    connection.peripheral.engine.frameReceived(connection.peripheralLink, frame)
-                } else {
-                    connection.central.engine.frameReceived(connection.centralLink, frame)
+            val deliver = {
+                repeat(times) {
+                    if (from === connection.central) {
+                        connection.peripheral.engine.frameReceived(connection.peripheralLink, frame)
+                    } else {
+                        connection.central.engine.frameReceived(connection.centralLink, frame)
+                    }
                 }
+            }
+            if (deliveryDelayMs > 0) {
+                scheduler.schedule(deliveryDelayMs) { deliver() }
+            } else {
+                deliver()
             }
         }
     }
@@ -265,6 +314,42 @@ class Network(private val scheduler: FakeScheduler) {
                 connection.peripheral.engine.linkDown(connection.peripheralLink)
             } else {
                 connection.central.engine.linkDown(connection.centralLink)
+            }
+        }
+    }
+
+    fun writeTcp(from: Phone, linkId: Int, frame: ByteArray) {
+        val connection = find(from, linkId)
+        connection.tcpFrames += from to frame
+        scheduler.schedule(0) {
+            if (!connection.tcpOpen) {
+                from.engine.tcpFrameWritten(linkId, false)
+                return@schedule
+            }
+            from.engine.tcpFrameWritten(linkId, true)
+            if (connection.loseTcp(from, frame)) {
+                return@schedule
+            }
+            if (from === connection.central) {
+                connection.peripheral.engine.tcpFrameReceived(connection.peripheralLink, frame)
+            } else {
+                connection.central.engine.tcpFrameReceived(connection.centralLink, frame)
+            }
+        }
+    }
+
+    /** One side closed the TCP connection; the other notices a moment later. */
+    fun closeTcp(from: Phone, linkId: Int) {
+        val connection = find(from, linkId)
+        if (!connection.tcpOpen) {
+            return
+        }
+        connection.tcpOpen = false
+        scheduler.schedule(1) {
+            if (from === connection.central) {
+                connection.peripheral.engine.tcpDown(connection.peripheralLink)
+            } else {
+                connection.central.engine.tcpDown(connection.centralLink)
             }
         }
     }

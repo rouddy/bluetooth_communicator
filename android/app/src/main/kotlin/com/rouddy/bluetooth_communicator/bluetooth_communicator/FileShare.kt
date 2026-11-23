@@ -10,6 +10,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.os.ParcelFileDescriptor
 import android.provider.OpenableColumns
 import android.text.format.Formatter
@@ -262,7 +263,23 @@ object FileShare : FileTransferHost {
 
     // ------------------------------------------------------------ events
 
+    /** When each transfer started moving bytes, for the speed it logs at the end. */
+    private val startedAt = HashMap<Long, Long>()
+
     override fun onTransferChanged(transfer: FileTransfer) {
+        if (transfer.state == TransferState.TRANSFERRING) {
+            startedAt.getOrPut(transfer.id) { SystemClock.elapsedRealtime() }
+        } else {
+            startedAt.remove(transfer.id)?.takeIf { transfer.state == TransferState.COMPLETED }?.let { start ->
+                val ms = (SystemClock.elapsedRealtime() - start).coerceAtLeast(1)
+                val over = if (BleRuntime.engine.session(transfer.peerId)?.tcp == true) "TCP" else "Bluetooth"
+                Log.i(
+                    TAG,
+                    "Transfer ${transfer.id} (${if (transfer.outgoing) "send" else "receive"}) of ${transfer.size} bytes " +
+                        "took $ms ms: ${transfer.size * 1000 / ms / 1024} KiB/s, now on $over"
+                )
+            }
+        }
         if (transfer.state == TransferState.FAILED) {
             // Kept for errors seen once that didn't come back (TODO 38).
             Log.w(

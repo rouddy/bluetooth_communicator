@@ -386,10 +386,26 @@ final class ProtocolEngine {
       } while pumpAgain
     }
 
+    /// Whether the last frame started was an ACK's.
+    private var lastWasAck = false
+
+    /// The head of the highest priority, except that ACKs take turns with commands and
+    /// messages: a central receiving a file always had an ACK waiting (its writes crawl
+    /// while the peer's notifications congest the link), and messages behind the ACKs
+    /// expired unsent. File chunks still wait for everything else.
+    private func nextRecord() -> OutgoingRecord? {
+      guard let first = queues.first(where: { !$0.isEmpty })?.first else { return nil }
+      if first.priority == ProtocolEngine.priorityAck && lastWasAck,
+        let other = queues[ProtocolEngine.priorityControl].first ?? queues[ProtocolEngine.priorityData].first
+      {
+        return other
+      }
+      return first
+    }
+
     private func startNextFrame() {
-      guard writing == nil, !closed,
-        let record = queues.first(where: { !$0.isEmpty })?.first
-      else { return }
+      guard writing == nil, !closed, let record = nextRecord() else { return }
+      lastWasAck = record.priority == ProtocolEngine.priorityAck
       if record.frames == nil, record.priority == ProtocolEngine.priorityBulk,
         maxFrameSize <= ProtocolEngine.smallFrameSize
       {
@@ -1104,7 +1120,8 @@ final class ProtocolEngine {
     link.probes[msgId] = { finish(true) }
     let ping = DataEnvelope(
       msgId: msgId, flags: Envelope.flagAckReq, path: ProtocolEngine.pingPath, replyTo: 0, payload: Data())
-    sendSealed(link, .data(ping), ProtocolEngine.priorityControl) { written in
+    // With the ACKs: nothing depends on its order.
+    sendSealed(link, .data(ping), ProtocolEngine.priorityAck) { written in
       if !written {
         finish(false)
       }

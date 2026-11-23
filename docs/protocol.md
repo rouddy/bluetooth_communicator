@@ -1,6 +1,6 @@
 # BLE 메시지 프로토콜 v1
 
-> 상태: **Android와 iOS에 구현했습니다**(14절의 1–6단계, Android는 7단계도). 내장 기능 `/clipboard`, `/file`, `/control/media`(10절)도 있습니다. `/control/media`는 Android만 조작당하고, iOS는 조작하는 쪽만 합니다. 관련 TODO: 23번.
+> 상태: **Android와 iOS에 구현했습니다**(14절의 1–6단계, Android는 7단계도). 내장 기능 `/clipboard`, `/file`, `/control/media`, `/tcp`(10절)도 있습니다. `/control/media`는 Android만 조작당하고, iOS는 조작하는 쪽만 합니다. `/tcp`(같은 Wi-Fi에 있으면 TCP로 보내기)는 Android끼리만 합니다. 관련 TODO: 23번.
 > 구현하면서 기기에서 확인한 내용을 반영해 원래 설계에서 바뀐 곳이 있습니다. 4절(조각 최대 512바이트), 9절(연결된 링크가 살아 있는지 확인), 10절(`/ping`), 12절(확정된 채널 계약)입니다.
 
 ## 1. 목표와 범위
@@ -12,7 +12,7 @@
 
 범위에서 뺀 것
 - **Wi-Fi 테더링**: 일반 앱은 켜고 끌 수 없습니다. `TetheringManager`는 시스템 API이고 `TETHER_PRIVILEGED`가 필요합니다. 일반 앱이 쓸 수 있는 `startLocalOnlyHotspot`은 인터넷을 공유하지 않습니다. iOS도 개인용 핫스팟을 앱에서 제어할 수 없습니다.
-- **대용량 전송**: GATT 처리량은 초당 수 KB에서 수십 KB 정도입니다. 파일은 `/file`(10절)로 보낼 수 있지만 큰 파일은 오래 걸립니다. 더 빨라야 하면 L2CAP CoC(Android 10+, iOS 11+)로 Frame 계층만 바꿉니다.
+- **대용량 전송**: GATT 처리량은 초당 수 KB에서 수십 KB 정도입니다. 파일은 `/file`(10절)로 보낼 수 있지만 큰 파일은 오래 걸립니다. 두 Android 폰이 같은 Wi-Fi에 있으면 `/tcp`(10절)가 frame을 TCP로 보내서 초당 MB 단위가 됩니다. 그 밖의 경우에 더 빨라야 하면 L2CAP CoC(Android 10+, iOS 11+)로 Frame 계층만 바꿉니다.
 - **iOS의 앱 간 통신**: iOS에는 AIDL에 해당하는 수단이 없습니다. iOS는 원격 조작을 하는 쪽과 `/debug/chat`만 지원합니다.
 - **오래 보관했다가 전달(store-and-forward)**: v1의 TTL은 최대 60초입니다.
 
@@ -44,6 +44,7 @@ Record     핸드셰이크(평문): HELLO, AUTH, PAIR_*, REJECT
            SEALED(AES-GCM): Envelope 하나
 Frame      record를 ATT 패킷 크기로 나누고 다시 합침
 GATT       message characteristic (central은 write, peripheral은 notify)
+           또는 TCP 연결 (`/tcp`, 10절: 두 폰이 같은 Wi-Fi에 있을 때. record 하나가 frame 하나)
 ```
 
 평문으로 오가는 것은 핸드셰이크 record뿐이고, 그 뒤의 모든 메시지는 SEALED record로 감쌉니다.
@@ -71,6 +72,7 @@ ATT 패킷(write 하나 또는 notification 하나)마다 프레임 하나가 �
 - 보내는 쪽은 링크마다 `tid` 0–63을 돌려 쓰고, 끝나지 않은 tid는 다시 쓰지 않습니다. 받는 쪽은 (링크, tid)마다 버퍼를 둡니다.
 - 서로 다른 tid의 조각은 섞여 올 수 있고, 받는 쪽은 이것을 반드시 처리해야 합니다. 같은 tid 안에서는 순서대로 옵니다. 그래서 큰 record를 보내는 중에도 ACK이나 명령을 끼워 보낼 수 있습니다.
 - 한 record의 조각은 모두 같은 링크로 보냅니다. 링크가 끊기면 그 링크의 미완성 버퍼를 모두 버립니다.
+- 링크에 TCP 연결(10절 `/tcp`)이 있어도 한 record는 한 운반 수단(GATT 또는 TCP)으로만 보냅니다. TCP에는 ATT 값의 한도가 없으므로 record 하나를 frame 하나(`S=1, E=1`)에 담습니다. 받는 쪽은 운반 수단마다 버퍼를 따로 둡니다.
 - 받는 쪽은 이런 경우 그 tid의 버퍼를 버립니다.
   - `S` 없이 시작한 조각이 옴
   - 진행 중인 tid에 `S`가 다시 옴. 이전 버퍼를 버리고 새로 시작합니다
@@ -290,7 +292,7 @@ ACK는 "도착했다"는 뜻입니다. 실행 결과는 따로 `REPLY` DATA로 �
 ## 8. Path와 라우팅
 
 - path는 UTF-8로 255바이트 이하입니다.
-- `/`로 시작하는 path는 이 앱의 내장 기능입니다. 지금 정의된 것은 `/ping`, `/clipboard`, `/file`, `/control/media`입니다.
+- `/`로 시작하는 path는 이 앱의 내장 기능입니다. 지금 정의된 것은 `/ping`, `/clipboard`, `/file`, `/control/media`, `/tcp`입니다.
 - 그 밖의 path는 `<packageName>/<임의 문자열>`입니다. 첫 `/` 앞이 패키지명입니다.
 - **앱 식별자**는 (패키지명, 서명 인증서 SHA-256)입니다. 패키지명만으로 판단하면, 서명이 다른 같은 이름의 앱을 사이드로드해서 데이터를 받을 수 있습니다.
 
@@ -315,6 +317,8 @@ ACK는 "도착했다"는 뜻입니다. 실행 결과는 따로 `REPLY` DATA로 �
   - `EXPIRED_NOT_SENT`(1000): 보내지 못함. 다시 시도해도 안전합니다
   - `EXPIRED_UNCONFIRMED`(1001): 보냈지만 ACK를 받지 못함. 상대가 받았을 수도 있습니다
 - **순서**: peer별로 보낸 순서대로 나갑니다. 우선순위는 핸드셰이크 > ACK > `/control` > 그 밖의 DATA > 파일 조각(`/file`의 CHUNK, 10절) 순이고, 우선순위가 높은 record는 낮은 record의 조각 사이에 끼어들 수 있습니다. 같은 우선순위 안에서는 순서를 지킵니다. 그래서 파일을 보내는 중에도 다른 메시지가 파일 뒤에서 기다리지 않습니다.
+  - `/ping`은 ACK와 같은 우선순위입니다. 순서와 상관이 없고, TCP로 바꾸는 동안에도 기다리지 않아야 하기 때문입니다(10절 `/tcp`).
+  - ACK가 계속 기다리고 있으면 그 뒤의 명령과 메시지가 나가지 못합니다. 그래서 ACK 프레임 다음에 기다리는 `/control`이나 DATA가 있으면 그것이 한 프레임 먼저 갑니다(파일 조각은 그대로 맨 뒤). 파일을 받는 central이 그랬습니다. 상대의 notification으로 링크가 혼잡하면 central의 write가 느려져서 언제나 ACK가 기다리고 있었고, 그동안 보낸 메시지는 TTL이 지나 보내지 못했습니다(기기에서 확인함).
 - **작은 프레임에서 파일 조각 미루기**: 링크가 기본 ATT MTU(23, 프레임 20바이트)로 올라왔으면, 파일 조각은 링크가 생긴 뒤 최대 3초까지 보내기 시작하지 않고 MTU가 커지기를 기다립니다(커지면 바로 보냄). 20바이트로 자르면 16 KiB 조각 하나가 820프레임인데, Android는 그만큼의 notification이 쌓이면 ATT 채널이 혼잡해지고, 혼잡한 동안에는 상대 write에 대한 응답을 버립니다. 상대(iPhone)는 응답을 30초 기다린 뒤 연결을 끊었습니다(기기에서 확인함). 다른 우선순위의 record는 기다리지 않습니다.
 - **흐름 제어**: peer별로 ACK를 기다리는 DATA는 최대 4개입니다. AIDL 앱별 대기열은 32개이고, 넘으면 로컬에서 `BUSY`입니다.
 - **전달 의미**: 보통은 한 번 전달됩니다. 다만 받는 쪽 프로세스가 재시작돼 중복 기록이 사라진 사이에 재전송이 오면 두 번 전달될 수 있습니다(at-least-once). 그래서 원격 조작은 TOGGLE보다 PLAY와 PAUSE처럼 여러 번 실행해도 결과가 같은 op를 쓰고, 앱은 (peerId, msgId)로 중복을 거릅니다.
@@ -447,6 +451,57 @@ B → A  DATA  #7   /control/media  REPLY(#41)  [00 01]  성공, 재생 중
 - iOS: 다른 앱의 재생을 제어할 수 없어서 CAPS에 넣지 않습니다. 조작하는 쪽 역할만 합니다.
 - 허용 범위: peer 승인(6.3)을 받은 상대만 조작할 수 있습니다.
 
+### `/tcp`
+
+두 폰이 같은 Wi-Fi에 있으면 세션의 frame을 GATT 대신 TCP 연결로 보냅니다. 핸드셰이크와 세션은 Bluetooth에 그대로 두고, TCP는 그 세션의 record를 나르기만 합니다. GATT 링크가 끊기면 세션과 함께 TCP도 끝납니다. Android만 CAPS에 넣습니다(iOS는 아직 없음).
+
+- 속도: Galaxy Z Fold5 → Galaxy Jump3, 같은 공유기에서 5 MB 파일이 3.1초(약 1.6 MB/s)였습니다. 같은 두 폰의 GATT로는 초당 4–30 KB입니다.
+
+요청 payload는 `u8 op`로 시작하고, `ACK_REQ`를 붙입니다.
+
+| op | 이름 | 보내는 쪽 | 나머지 |
+|---|---|---|---|
+| 0 | WIFI | 양쪽 | `u8 on`: Wi-Fi에 연결돼 있고 IPv4 주소가 있으면 1 |
+| 1 | OFFER | C | `u16 port`, `token[16]`, `u8 count`, 주소마다 `u8 len`(4 또는 16)과 주소 |
+
+OFFER의 답은 P가 연결하지 못했을 때만 보내는 `REPLY` DATA이고, payload는 `u8 result`(1 FAILED, 2 NO_WIFI)입니다. 성공은 C가 연결을 받아서 압니다.
+
+```
+C ⇄ P  WIFI on                      세션이 맺어질 때, 그리고 Wi-Fi가 바뀔 때마다
+C      임의 포트로 listen            둘 다 Wi-Fi에 있으면
+C → P  OFFER  192.168.1.193:41441, token
+P → C  TCP 연결, opening(token)      P의 Wi-Fi 네트워크로
+C → P  0x01                         token이 맞으면. listen은 닫음
+C ⇄ P  /ping을 Bluetooth로 보내고 ACK를 받으면 새 record부터 TCP로 (아래)
+```
+
+순서
+1. 세션이 맺어지면 양쪽이 WIFI를 보내고, Wi-Fi 상태(네트워크나 주소)가 바뀔 때마다 다시 보냅니다. 전달되지 않으면 5초 뒤에 다시 보냅니다. 상대 CAPS에 `/tcp`가 없으면 `NO_RECEIVER`로 끝나고, 그 세션에서는 더 하지 않습니다.
+2. C는 자기와 상대가 모두 Wi-Fi에 있으면 자기 Wi-Fi 주소의 임의 포트(0번으로 bind)로 listen하고 OFFER를 보냅니다. token은 OFFER마다 새로 만든 16바이트 난수입니다. SEALED로만 오가므로 승인한 peer만 압니다.
+3. P는 Wi-Fi 네트워크를 지정해서 연결합니다(기본 네트워크가 모바일 데이터일 수 있음). 주소마다 3초를 기다립니다. C는 opening의 token이 맞으면 `0x01`로 답하고 listen을 닫습니다. 맞지 않는 연결은 닫고 계속 기다립니다. 10초 안에 연결이 없으면 그 OFFER는 실패입니다.
+4. 실패하면(P의 REPLY, 연결 없음, OFFER가 전달되지 않음) C는 2초, 10초, 30초, 1분, 2분, 5분 뒤에 다시 시도하고, 그 뒤로는 어느 쪽이든 Wi-Fi가 바뀔 때까지 기다립니다. 연결되면 이 횟수는 처음으로 돌아갑니다.
+5. WIFI를 받으면 그 peer와의 TCP는 닫습니다. off면 상대가 Wi-Fi를 떠난 것이고, on이 다시 오면 주소가 바뀌었을 수 있기 때문입니다. on이면 C가 다시 OFFER를 보냅니다.
+
+TCP stream
+- opening(P → C): `"RBCT"`, `u8 version`(1), `token[16]`. 답(C → P): `u8 0x01`.
+- 그 뒤로는 양쪽이 `u32 length`와 frame(4절)을 보냅니다. length 0은 keepalive입니다. 2초 동안 보낼 것이 없으면 keepalive를 보내고, 6초 동안 아무것도 받지 못하면 연결이 끊긴 것으로 봅니다. 상대가 Wi-Fi 범위를 벗어나면 TCP는 오류 없이 멈추기 때문입니다.
+- frame 하나에는 record 하나가 통째로 들어갑니다(4절). length는 `MAX_MESSAGE_SIZE` + 5를 넘지 않습니다.
+
+TCP로 바꾸기
+- 연결되면 엔진은 새로 시작하는 record부터 TCP로 보냅니다. Bluetooth로 보내던 record는 Bluetooth로 끝냅니다.
+- 다만 곧바로 바꾸지 않습니다. Android peripheral은 notification을 stack 대기열에 넣으면 보냈다고 알려 주므로, 대기열에 남은 record보다 TCP로 보낸 record가 먼저 도착할 수 있습니다. 파일을 보내는 중에 바꾸자 다음 조각이 앞 조각보다 먼저 도착해서 받는 쪽이 MALFORMED로 실패했습니다(기기에서 확인함). 그래서 Bluetooth로 보내던 record가 끝나면 Bluetooth로 `/ping`을 하나 보내고, 그 ACK가 오면 TCP로 바꿉니다. ACK는 상대가 그때까지 Bluetooth로 보낸 것을 모두 받았다는 뜻입니다.
+- 그동안 새 record는 기다리고, 순서와 상관없는 ACK와 `/ping`만 갑니다. Bluetooth로 보냈어도 같은 대기열 뒤에서 기다렸을 것이므로 더 늦어지지는 않습니다. 보통은 0.1–0.2초, 파일 조각이 대기열에 있으면 1–2초 걸렸습니다. 15초 안에 ACK가 없으면 그냥 바꿉니다.
+- TCP로 받은 record는 SEALED만 처리하고 핸드셰이크 record는 버립니다. 같은 Wi-Fi의 누구든 연결해서 HELLO를 보낼 수 있기 때문입니다(token을 모르면 opening에서 끊기지만, 한 번 더 막음).
+
+Bluetooth로 돌아오기
+- 연결이 끊기거나(읽기·쓰기 오류, keepalive 시간 초과), 어느 쪽이든 Wi-Fi를 떠나거나, 세션이 끝나면 TCP를 닫습니다.
+- 아직 쓰지 않은 record는 같은 바이트로 Bluetooth로 보냅니다. TCP가 실제로 전달했다면 상대의 재전송 윈도우가 두 번째를 버립니다(같은 counter).
+- 쓴 뒤 ACK를 받지 못한 메시지는 다시 보냅니다. 상대의 중복 제거(9절)가 두 번 전달되지 않게 합니다. TCP가 삼킨 ACK는 상대가 자기 메시지를 다시 보낼 때 다시 옵니다. 기다리던 `/ping`도 다시 보내고(그렇지 않으면 링크가 죽은 것으로 판단함), CAPS도 다시 보냅니다.
+- 파일 전송은 끊기지 않습니다. Fold5에서 5 MB를 보내는 중에 Wi-Fi를 끄면 Bluetooth로 이어 보냈고, Wi-Fi가 다시 연결되자 TCP로 바꿔서 끝냈습니다(체크섬 일치, 양쪽 역할 모두).
+
+Galaxy에서 본 것
+- Wi-Fi를 끄거나 켜면 Galaxy의 GATT 데이터베이스가 바뀌어서(시스템 서비스가 자기 GATT 서비스를 등록하거나 지움) 상대 central에 Service Changed가 옵니다. central은 이때 핸드셰이크를 다시 하므로(상대 앱이 GATT server를 다시 등록한 경우를 위한 것) 세션이 다시 맺어집니다. 메시지는 다음 세션으로 다시 보내므로 파일 전송은 이어지지만, Wi-Fi가 바뀔 때마다 세션이 한 번씩 다시 맺어집니다(15절).
+
 ## 11. AIDL
 
 - 별도의 bound service를 export합니다(이름 미정, action `com.rouddy.bluetooth_communicator.action.BIND`). 지금의 `BluetoothBackgroundService`는 `exported=false`이고 `onBind`가 null을 돌려줍니다.
@@ -511,6 +566,7 @@ parcelable PeerInfo { String peerId; String name; boolean connected; }
 - 루팅 등으로 앱 저장소나 Keystore가 노출된 폰
 - 사용자가 코드를 비교하지 않고 승인하는 것
 - 크기와 시간을 이용한 트래픽 분석. 평문 HELLO의 이름과 peerId 노출(BLE 광고 이름은 원래 공개됨)
+- `/tcp`: 같은 Wi-Fi에 있는 사람은 TCP로 오가는 크기와 시간을 보고, 연결을 막거나 끊을 수 있습니다(그러면 Bluetooth로 돌아감). 내용은 SEALED라 보거나 바꿀 수 없고, token을 모르면 연결을 열 수 없습니다
 - 서비스 거부
   - 인증되지 않은 REJECT
   - 같은 링크를 쓰는 다른 앱이 끼워 넣은 쓰레기 데이터나 HELLO. 세션이 끊기거나 다시 시작됩니다
@@ -542,5 +598,8 @@ parcelable PeerInfo { String peerId; String name; boolean connected; }
 - ~~Keystore HMAC 키 가져오기(`KeyProtection`)가 대상 기기(Samsung 등)에서 문제 없는지~~ Galaxy Z Fold5, S23(Android 17)에서 문제 없음. 실패하면 앱 prefs에 저장하고 로그를 남깁니다
 - 시간 제한, 윈도우, 대기열 크기 같은 숫자: 기기에서 측정한 뒤 조정합니다
 - `/file`: 조각 크기와 ACK를 기다리는 조각 수(16 KiB × 3)를 바꾸면 빨라지는지. 지금 값으로 잰 속도는 10절에 있습니다. central 쪽이 느린 것은 조각마다 write 응답을 기다리기 때문으로 보입니다
+- `/tcp`: Wi-Fi가 바뀔 때마다 Galaxy의 Service Changed로 세션이 다시 맺어짐(10절). Service Changed 뒤에 우리 서비스와 characteristic이 그대로면 핸드셰이크를 다시 하지 않아도 되는지
+- `/tcp`: GATT 링크가 끊겨도(Bluetooth 범위를 벗어나도) Wi-Fi로 세션을 이어 갈지. 지금은 세션이 GATT 링크에 묶여 있음
+- `/tcp`를 iOS에도 둘지(Network framework). 지금 iOS는 CAPS에 넣지 않아서 Android가 제안하지 않음
 - store-and-forward가 필요한지
 - peer별로 "원격 조작"과 "앱 간 통신"을 따로 허용하는 토글이 필요한지
