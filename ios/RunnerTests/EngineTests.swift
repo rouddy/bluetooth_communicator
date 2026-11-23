@@ -358,6 +358,41 @@ final class EngineTests: XCTestCase {
     XCTAssertEqual(b.pairingRequests.count, 1)
   }
 
+  func testARestoredPeripheralAsksTheCentralToStartOver() {
+    let old = pair()
+    let restarted = network.phone("B", b.address, b.peerId)
+    b.store.peers().forEach { restarted.store.update($0) }
+    restarted.store.keys = b.store.keys
+    // B's app restarted and iOS restored A's subscription; A still holds its session.
+    let restored = network.restore(old, as: restarted)
+    let lost = a.send(to: restarted, Data("while B restarted".utf8))
+    settle()
+    XCTAssertFalse(restarted.engine.isConnected(deviceId: a.address))
+    XCTAssertEqual(restarted.delivered.count, 0)
+
+    restarted.engine.requestHandshake(linkId: restored.peripheralLink)
+    settle()
+
+    XCTAssertTrue(a.engine.isConnected(deviceId: b.address))
+    XCTAssertTrue(restarted.engine.isConnected(deviceId: a.address))
+    XCTAssertEqual(lost.value, [DeliveryStatus.ok])
+    let results = restarted.send(to: a, Data("back".utf8))
+    settle()
+    XCTAssertEqual(results.value, [DeliveryStatus.ok])
+  }
+
+  func testAPeripheralOnlyAsksForAHandshakeWithoutASession() {
+    let connection = pair()
+    b.events = []
+
+    b.engine.requestHandshake(linkId: connection.peripheralLink)
+    settle()
+
+    XCTAssertTrue(a.engine.isConnected(deviceId: b.address))
+    XCTAssertTrue(b.engine.isConnected(deviceId: a.address))
+    XCTAssertTrue(b.events.isEmpty)
+  }
+
   func testAPeerWhoseAppRestartedUnderALiveConnectionReplacesItsDeadSession() {
     let old = pair()
     old.delivers = false

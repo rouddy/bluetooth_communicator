@@ -412,7 +412,33 @@ class ProtocolEngine(
 
     /** The ATT MTU changed; frames split from now on use the new size. */
     fun setMaxFrameSize(linkId: Int, maxFrameSize: Int) {
-        links[linkId]?.maxFrameSize = maxFrameSize.coerceIn(Frames.MIN_FRAME_SIZE, Frames.MAX_FRAME_SIZE)
+        val link = links[linkId] ?: return
+        val size = maxFrameSize.coerceIn(Frames.MIN_FRAME_SIZE, Frames.MAX_FRAME_SIZE)
+        if (size == link.maxFrameSize) {
+            return
+        }
+        link.maxFrameSize = size
+        host.log("Link $linkId now uses frames of $size bytes")
+    }
+
+    /**
+     * A peripheral link that came back without its session: iOS state restoration
+     * revives the subscription of a central that was talking to the app's previous
+     * process. That central still holds its session, so it won't send HELLO_c; a HELLO
+     * of ours makes it drop the session and start over (6.5). Android doesn't need it
+     * (a restarted app registers a new GATT server, which the central notices), but the
+     * engines stay alike.
+     */
+    fun requestHandshake(linkId: Int) {
+        val link = links[linkId] ?: return
+        if (link.closed || link.role != Role.PERIPHERAL || (link.phase != Phase.AWAIT_HELLO && link.phase != Phase.DONE)) {
+            return
+        }
+        host.log("Asking the central on link $linkId to start over")
+        link.phase = Phase.AWAIT_HELLO
+        val nonce = ByteArray(Record.NONCE_SIZE).also(random::nextBytes)
+        sendRecord(link, ownHello(nonce, nonceC = null), PRIORITY_HANDSHAKE)
+        armHandshakeTimer(link)
     }
 
     fun frameReceived(linkId: Int, frame: ByteArray) {

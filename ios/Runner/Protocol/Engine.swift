@@ -473,7 +473,25 @@ final class ProtocolEngine {
 
   /// The ATT MTU changed; frames split from now on use the new size.
   func setMaxFrameSize(linkId: Int, maxFrameSize: Int) {
-    links[linkId]?.maxFrameSize = min(max(maxFrameSize, Frames.minFrameSize), Frames.maxFrameSize)
+    guard let link = links[linkId] else { return }
+    let size = min(max(maxFrameSize, Frames.minFrameSize), Frames.maxFrameSize)
+    guard size != link.maxFrameSize else { return }
+    link.maxFrameSize = size
+    host.log("Link \(linkId) now uses frames of \(size) bytes")
+  }
+
+  /// A peripheral link that came back without its session: iOS state restoration
+  /// revives the subscription of a central that was talking to the app's previous
+  /// process. That central still holds its session, so it won't send HELLO_c; a HELLO
+  /// of ours makes it drop the session and start over (6.5).
+  func requestHandshake(linkId: Int) {
+    guard let link = links[linkId], !link.closed, link.role == .peripheral,
+      link.phase == .awaitHello || link.phase == .done
+    else { return }
+    host.log("Asking the central on link \(linkId) to start over")
+    link.phase = .awaitHello
+    sendRecord(link, ownHello(nonce: randomNonce(), nonceC: nil), ProtocolEngine.priorityHandshake)
+    armHandshakeTimer(link)
   }
 
   func frameReceived(linkId: Int, frame: Data) {

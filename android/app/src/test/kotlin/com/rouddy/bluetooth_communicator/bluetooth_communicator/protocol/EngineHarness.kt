@@ -190,6 +190,20 @@ class Network(private val scheduler: FakeScheduler) {
         return connection
     }
 
+    /**
+     * The peripheral's app restarted while Bluetooth stayed connected and iOS restored
+     * the subscription: [restarted] takes over the peripheral end under a new link, and
+     * the central's link carries on as if nothing happened.
+     */
+    fun restore(connection: Connection, restarted: Phone): Connection {
+        connection.open = false
+        connections.remove(connection)
+        val restored = Connection(connection.central, connection.centralLink, restarted, nextLinkId++)
+        connections += restored
+        restarted.engine.linkUp(restored.peripheralLink, Role.PERIPHERAL, connection.central.address, maxFrameSize, false)
+        return restored
+    }
+
     private fun find(phone: Phone, linkId: Int) = connections.first {
         (it.central === phone && it.centralLink == linkId) || (it.peripheral === phone && it.peripheralLink == linkId)
     }

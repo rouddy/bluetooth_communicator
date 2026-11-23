@@ -241,6 +241,22 @@ final class Network {
     return connection
   }
 
+  /// The peripheral's app restarted while Bluetooth stayed connected and iOS restored
+  /// the subscription: `restarted` takes over the peripheral end under a new link, and
+  /// the central's link carries on as if nothing happened.
+  func restore(_ connection: Connection, as restarted: Phone) -> Connection {
+    connection.open = false
+    connections.removeAll { $0 === connection }
+    let restored = Connection(
+      central: connection.central, centralLink: connection.centralLink, peripheral: restarted, peripheralLink: nextLinkId)
+    nextLinkId += 1
+    connections.append(restored)
+    restarted.engine.linkUp(
+      linkId: restored.peripheralLink, role: .peripheral, deviceId: connection.central.address, maxFrameSize: maxFrameSize,
+      userInitiated: false)
+    return restored
+  }
+
   private func find(_ phone: Phone, _ linkId: Int) -> Connection {
     connections.first {
       ($0.central === phone && $0.centralLink == linkId) || ($0.peripheral === phone && $0.peripheralLink == linkId)

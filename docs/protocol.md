@@ -223,7 +223,8 @@ C → P  AUTH_c,  P → C  AUTH_p                 (6.4)
 | BAD_MAC을 보내거나 받음 | 경고를 띄우고 자동 재연결 대상에서 뺍니다. 공격일 수 있으므로 자동으로 다시 페어링하지 않습니다 |
 | USER_REJECTED, TIMEOUT, CANNOT_PROMPT | 양쪽 모두 "페어링 실패"를 표시합니다. C는 자동 재연결하지 않습니다 |
 | ALREADY_CONNECTED | 9절 |
-| 세션 중에 HELLO를 받음(상대 앱이 다시 시작됨) | 세션을 버리고 핸드셰이크를 처음부터 다시 합니다 |
+| 세션 중에 HELLO를 받음(상대 앱이 다시 시작됨) | 세션을 버리고 핸드셰이크를 처음부터 다시 합니다. C가 HELLO_p를 받으면 HELLO_c부터 다시 보냅니다 |
+| P의 앱이 다시 시작됐는데 연결과 구독은 남음(iOS 상태 복원) | C는 세션이 살아 있다고 보고 HELLO_c를 보내지 않습니다. 그래서 P가 그 링크에서 nonceC 없는 HELLO_p를 먼저 보내고(`requestHandshake`), C는 위 줄처럼 다시 시작합니다 |
 | SEALED 복호화 실패 | 그 record만 버립니다. 연속 5번이면 C가 링크를 닫습니다 |
 | 세션 전에 SEALED가 옴, 세션 뒤에 다른 핸드셰이크 record가 옴 | 버립니다 |
 

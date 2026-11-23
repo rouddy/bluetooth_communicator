@@ -633,6 +633,20 @@ class BluetoothBackgroundService : Service(), BleTransport {
     // the server never hears onMtuChanged; use what the client side learned.
     private fun attMtu(address: String) = clientMtus[address] ?: centralMtus[address] ?: DEFAULT_ATT_MTU
 
+    // A write of n bytes means the MTU is at least n + 3. The server misses
+    // onMtuChanged when the exchange happens before it's registered (an iPhone
+    // reconnecting right after Bluetooth comes back on), which left links at 20-byte
+    // frames; the central's frames, sized by its own MTU, tell us instead.
+    private fun learnMtuFromWrite(address: String, size: Int) {
+        val mtu = size + 3
+        if (mtu <= attMtu(address)) {
+            return
+        }
+        centralMtus[address] = mtu
+        serverLinkIds[address]?.let { engine.setMaxFrameSize(it, Frames.frameSize(mtu)) }
+        clientLinkIds[address]?.let { engine.setMaxFrameSize(it, Frames.frameSize(mtu)) }
+    }
+
     // BleTransport: the engine's frames go out as a characteristic write (we're the
     // central) or a notification (we're the peripheral), one GATT operation at a time.
     override fun writeFrame(linkId: Int, frame: ByteArray) {
@@ -1338,6 +1352,7 @@ class BluetoothBackgroundService : Service(), BleTransport {
                 if (!serverLinkIds.containsKey(address) && subscribedCentrals.containsKey(address)) {
                     serverLinkUp(address)
                 }
+                learnMtuFromWrite(address, frame.size)
                 serverLinkIds[address]?.let { engine.frameReceived(it, frame) }
             }
         }

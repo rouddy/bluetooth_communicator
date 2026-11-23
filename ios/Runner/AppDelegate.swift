@@ -212,6 +212,9 @@ final class IOSBleBackgroundManager: NSObject, FlutterStreamHandler, EngineHost 
   private var serviceAdded = false
   private var addingService = false
   private var subscribedCentrals: [UUID: CBCentral] = [:]
+  // Centrals whose subscription state restoration revived. They were talking to the
+  // app's previous process, so once Bluetooth is on they're asked to start over.
+  private var restoredCentrals: Set<UUID> = []
   private var pendingNotifications: [(linkId: Int, data: Data, central: CBCentral)] = []
 
   private var advertisingEnabled = false
@@ -461,8 +464,14 @@ final class IOSBleBackgroundManager: NSObject, FlutterStreamHandler, EngineHost 
       else { return failWrite(linkId) }
       // Answered by didWriteValueFor; the engine has at most one frame out per link.
       peripheral.writeValue(frame, for: characteristic, type: .withResponse)
+      // A link can come up before the MTU exchange (seen right after a reconnect),
+      // with 20-byte frames. CoreBluetooth has no callback for the exchange, so look
+      // again with each frame.
+      engine.setMaxFrameSize(
+        linkId: linkId, maxFrameSize: Frames.frameSize(packetLength: peripheral.maximumWriteValueLength(for: .withoutResponse)))
     case .server(let uuid):
       guard let central = subscribedCentrals[uuid], frameCharacteristic != nil else { return failWrite(linkId) }
+      engine.setMaxFrameSize(linkId: linkId, maxFrameSize: Frames.frameSize(packetLength: central.maximumUpdateValueLength))
       pendingNotifications.append((linkId: linkId, data: frame, central: central))
       flushNotifications()
     case nil:
@@ -988,7 +997,11 @@ extension IOSBleBackgroundManager: CBPeripheralManagerDelegate {
       if advertisingEnabled {
         startAdvertisingIfPossible()
       }
+      let restored = restoredCentrals
+      restoredCentrals.removeAll()
+      restored.compactMap { serverLinkIds[$0] }.forEach { engine.requestHandshake(linkId: $0) }
     case .poweredOff:
+      restoredCentrals.removeAll()
       resetPeripheralRole()
       isAdvertising = false
       bluetoothOn = false
@@ -1007,9 +1020,12 @@ extension IOSBleBackgroundManager: CBPeripheralManagerDelegate {
     if let characteristic {
       frameCharacteristic = characteristic
       serviceAdded = true
-      // Their sessions died with the old process; a new HELLO_c revives each link.
+      // Their sessions died with the old process, but they don't know: the service
+      // didn't change, so they won't send a new HELLO_c on their own. Once powered on,
+      // each is asked to start over (requestHandshake, 6.5).
       characteristic.subscribedCentrals?.forEach {
         subscribedCentrals[$0.identifier] = $0
+        restoredCentrals.insert($0.identifier)
         serverLinkUp($0.identifier)
       }
     }

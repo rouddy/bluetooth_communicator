@@ -563,6 +563,41 @@ class EngineTest {
     }
 
     @Test
+    fun `a restored peripheral asks the central to start over`() {
+        val old = pair()
+        val restarted = network.phone("B", b.address, b.peerId)
+        restarted.store.peerMap.putAll(b.store.peerMap)
+        restarted.store.keys.putAll(b.store.keys)
+        // B's app restarted and iOS restored A's subscription; A still holds its session.
+        val restored = network.restore(old, restarted)
+        val lost = a.send(restarted, "while B restarted".toByteArray())
+        settle()
+        assertFalse(restarted.engine.isConnected(a.address))
+        assertEquals(0, restarted.delivered.size)
+
+        restarted.engine.requestHandshake(restored.peripheralLink)
+        settle()
+
+        assertTrue(a.engine.isConnected(b.address))
+        assertTrue(restarted.engine.isConnected(a.address))
+        assertEquals(listOf(DeliveryStatus.OK), lost)
+        assertEquals(listOf(DeliveryStatus.OK), restarted.send(a, "back".toByteArray()).also { settle() })
+    }
+
+    @Test
+    fun `a peripheral only asks for a handshake without a session`() {
+        val connection = pair()
+        b.events.clear()
+
+        b.engine.requestHandshake(connection.peripheralLink)
+        settle()
+
+        assertTrue(a.engine.isConnected(b.address))
+        assertTrue(b.engine.isConnected(a.address))
+        assertTrue(b.events.isEmpty())
+    }
+
+    @Test
     fun `a peripheral link that never finishes stops blocking reconnects`() {
         pair().drop()
         // A's central closes its side silently (e.g. it was a duplicate) and B never hears.
