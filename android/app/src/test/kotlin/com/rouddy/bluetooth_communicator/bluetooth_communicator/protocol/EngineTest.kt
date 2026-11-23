@@ -268,6 +268,27 @@ class EngineTest {
     }
 
     @Test
+    fun `ACKs that keep coming don't hold a message back`() {
+        network.maxFrameSize = 512
+        val connection = pair()
+        b.deliverStatus = null
+        repeat(ProtocolEngine.MAX_IN_FLIGHT) { a.send(b, "m$it".toByteArray()) }
+        settle(100)
+        assertEquals(ProtocolEngine.MAX_IN_FLIGHT, b.heldDeliveries.size)
+        val before = connection.bleFrames.size
+
+        // B acknowledges all of them at once and has a message of its own: in practice a
+        // central receiving a file, whose writes crawl, so an ACK was always waiting.
+        b.heldDeliveries.forEach { it(DeliveryStatus.OK) }
+        val results = b.send(a, ByteArray(200))
+        settle()
+
+        val sizes = connection.bleFrames.drop(before).filter { it.first === b }.map { it.second.size }
+        assertEquals(1, sizes.indexOfFirst { it > 200 })
+        assertEquals(listOf(DeliveryStatus.OK), results)
+    }
+
+    @Test
     fun `a bulk message lets other messages go first`() {
         pair()
 

@@ -59,7 +59,10 @@ object TcpLinks {
     private const val BUFFER_SIZE = 64 * 1024
 
     /** The central tries again after these; then it waits for a Wi-Fi change on either side. */
-    private val RETRY_DELAYS_MS = longArrayOf(2_000, 10_000, 30_000)
+    private val RETRY_DELAYS_MS = longArrayOf(2_000, 10_000, 30_000, 60_000, 120_000, 300_000)
+
+    /** A WIFI that wasn't delivered goes again after this. */
+    private const val WIFI_RESEND_MS = 5_000L
 
     private val handler = Handler(Looper.getMainLooper())
     private val io = Executors.newCachedThreadPool { Thread(it, TAG).apply { isDaemon = true } }
@@ -237,15 +240,19 @@ object TcpLinks {
             return
         }
         session.sentWifi = on
+        val sentAt = SystemClock.elapsedRealtime()
         engine.send(session.peerId, TcpMessage.PATH, TcpMessage.wifi(on), 0, 0, null) { status ->
+            Log.d(TAG, "WIFI ${if (on) "on" else "off"} to ${session.deviceId}: status $status after ${SystemClock.elapsedRealtime() - sentAt} ms")
             when (status) {
                 DeliveryStatus.OK -> Unit
                 DeliveryStatus.NO_RECEIVER, DeliveryStatus.UNSUPPORTED -> {
                     session.unsupported = true
                     Log.i(TAG, "${session.deviceId} doesn't do /tcp; staying on Bluetooth")
                 }
-                // Said again on the next change.
-                else -> if (session.sentWifi == on) session.sentWifi = null
+                else -> if (session.sentWifi == on) {
+                    session.sentWifi = null
+                    handler.postDelayed({ sendWifi(session) }, WIFI_RESEND_MS)
+                }
             }
         }
     }
@@ -382,7 +389,9 @@ object TcpLinks {
         }
         Log.i(TAG, "Offering TCP to ${session.deviceId} at ${address.hostAddress}:$port")
         val payload = TcpMessage.offer(port, offer.token, listOf(address.address))
+        val sentAt = SystemClock.elapsedRealtime()
         offer.msgId = engine.send(session.peerId, TcpMessage.PATH, payload, 0, 0, null) { status ->
+            Log.d(TAG, "OFFER to ${session.deviceId}: status $status after ${SystemClock.elapsedRealtime() - sentAt} ms")
             if (status != DeliveryStatus.OK) {
                 handler.post { offerFailed(session, offer, "OFFER not delivered (status $status)") }
             }

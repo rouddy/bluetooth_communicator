@@ -222,6 +222,12 @@ class Network(private val scheduler: FakeScheduler) {
     /** Frames for which this returns true vanish (their write still succeeds). */
     var lose: (from: Phone, frame: ByteArray) -> Boolean = { _, _ -> false }
 
+    /**
+     * How much later than its write a frame arrives, like an Android peripheral's
+     * notification: reported sent once queued in the stack, delivered later.
+     */
+    var deliveryDelayMs = 0L
+
     fun phone(name: String, address: String, peerId: PeerId) = Phone(name, address, peerId, scheduler, this)
 
     fun connect(
@@ -280,12 +286,19 @@ class Network(private val scheduler: FakeScheduler) {
             } else {
                 1
             }
-            repeat(times) {
-                if (from === connection.central) {
-                    connection.peripheral.engine.frameReceived(connection.peripheralLink, frame)
-                } else {
-                    connection.central.engine.frameReceived(connection.centralLink, frame)
+            val deliver = {
+                repeat(times) {
+                    if (from === connection.central) {
+                        connection.peripheral.engine.frameReceived(connection.peripheralLink, frame)
+                    } else {
+                        connection.central.engine.frameReceived(connection.centralLink, frame)
+                    }
                 }
+            }
+            if (deliveryDelayMs > 0) {
+                scheduler.schedule(deliveryDelayMs) { deliver() }
+            } else {
+                deliver()
             }
         }
     }

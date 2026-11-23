@@ -22,6 +22,9 @@ class EngineTcpTest {
         settle()
         assertTrue(a.engine.isConnected(b.address))
         assertEquals(true to true, connection.tcpUp())
+        // The switch waits for a `/ping` over Bluetooth.
+        settle()
+        assertTrue(a.engine.session(b.peerId)!!.tcp)
         return connection
     }
 
@@ -43,6 +46,46 @@ class EngineTcpTest {
         assertEquals(1, connection.framesFrom(b, tcp = true))
         assertTrue(connection.tcpFrames.first().second.size > 3_000)
         assertEquals(bleBefore, connection.framesFrom(a, tcp = false) + connection.framesFrom(b, tcp = false))
+    }
+
+    @Test
+    fun `records that start on TCP arrive after what Bluetooth still carries`() {
+        network.maxFrameSize = 512
+        val connection = network.connect(a, b, userInitiated = true)
+        settle()
+        // A's notifications sit in the stack for a while after they count as sent.
+        network.deliveryDelayMs = 300
+
+        val first = a.send(b, ByteArray(3_000) { 1 })
+        scheduler.advance(3)
+        connection.tcpUp()
+        assertFalse(a.engine.session(b.peerId)!!.tcp)
+        val second = a.send(b, ByteArray(100) { 2 })
+        settle()
+
+        assertEquals(listOf(3_000, 100), b.delivered.map { it.payload.size })
+        assertEquals(listOf(DeliveryStatus.OK), first)
+        assertEquals(listOf(DeliveryStatus.OK), second)
+        assertTrue(a.engine.session(b.peerId)!!.tcp)
+        // The second went over TCP.
+        assertTrue(connection.tcpFrames.any { it.first === a && it.second.size > 100 })
+    }
+
+    @Test
+    fun `the switch to TCP goes ahead if Bluetooth never confirms it`() {
+        network.maxFrameSize = 512
+        val connection = network.connect(a, b, userInitiated = true)
+        settle()
+        connection.delivers = false
+
+        connection.tcpUp()
+        val results = a.send(b, "late".toByteArray(), ttlMs = ProtocolEngine.MAX_TTL_MS)
+        settle(ProtocolEngine.TCP_SWITCH_TIMEOUT_MS - 1_000)
+        assertTrue(results.isEmpty())
+        settle(2_000)
+
+        assertTrue(a.engine.session(b.peerId)!!.tcp)
+        assertEquals(listOf(DeliveryStatus.OK), results)
     }
 
     @Test

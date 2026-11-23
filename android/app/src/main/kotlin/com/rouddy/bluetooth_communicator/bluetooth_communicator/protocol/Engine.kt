@@ -234,6 +234,14 @@ class ProtocolEngine(
          */
         const val BULK_HOLD_MS = 3_000L
 
+        /**
+         * How long the switch to TCP waits for its `/ping` over Bluetooth before going
+         * ahead anyway. A peripheral's stack may still hold a file's chunks in flight
+         * (3 × 16 KiB), seconds at Bluetooth speed; a record held meanwhile would have
+         * waited behind them over Bluetooth too.
+         */
+        const val TCP_SWITCH_TIMEOUT_MS = 15_000L
+
         /** A built-in path that only gets an ACK: proof that a link is alive. */
         const val PING_PATH = "/ping"
         private const val MAX_COUNTER = 0xFFFF_FFFFL
@@ -295,8 +303,19 @@ class ProtocolEngine(
     ) {
         val reassembler = FrameReassembler(MAX_MESSAGE_SIZE)
 
-        /** Whether the session has a TCP connection (`/tcp`); new records then go over it. */
+        /** Whether the session has a TCP connection (`/tcp`). */
         var tcp = false
+
+        /**
+         * Whether new records start on TCP. Not right away: what Bluetooth already
+         * carries could arrive after them, out of order (an Android peripheral counts a
+         * notification as sent once its stack queued it). Until a `/ping` sent over
+         * Bluetooth behind those records is acknowledged ([tcpBarrier]), only records
+         * whose order doesn't matter (ACKs, pings) and records already on their way go.
+         */
+        var tcpReady = false
+        var tcpBarrier = 0L
+        var tcpBarrierTimer: Cancellable? = null
 
         /** The TCP connection's own buffers: a record's frames all use one carrier (4절). */
         val tcpReassembler = FrameReassembler(MAX_MESSAGE_SIZE)
@@ -365,11 +384,17 @@ class ProtocolEngine(
                     record.onWritten?.invoke(true)
                 }
             }
+            if (tcp && !tcpReady && tcpBarrier == 0L && !bluetoothBusy()) {
+                sendTcpBarrier(this)
+            }
             pump()
         }
 
         /** The frame size grew, or TCP came up: a held bulk record may start now. */
         fun resume() = pump()
+
+        /** Whether a record is still on its way over Bluetooth (started, not all written). */
+        fun bluetoothBusy() = queues.any { queue -> queue.firstOrNull()?.let { it.frames != null && !it.viaTcp } == true }
 
         /**
          * The TCP connection went away: records that started on it but aren't written
@@ -420,11 +445,36 @@ class ProtocolEngine(
             }
         }
 
+        /** Whether the last frame started was an ACK's. */
+        private var lastWasAck = false
+
+        /**
+         * The head of the highest priority, except that ACKs take turns with commands and
+         * messages: a central receiving a file always had an ACK waiting (its writes crawl
+         * while the peer's notifications congest the link), and messages behind the ACKs
+         * expired unsent. File chunks still wait for everything else.
+         */
+        private fun nextRecord(): OutgoingRecord? {
+            if (tcp && !tcpReady) {
+                // Switching to TCP: a record already on Bluetooth finishes there (it's the
+                // head of its queue); new ones wait, except order-free ones.
+                return queues.firstNotNullOfOrNull { queue ->
+                    queue.firstOrNull()?.takeIf { it.frames != null || it.priority <= PRIORITY_ACK }
+                }
+            }
+            val first = queues.firstOrNull { it.isNotEmpty() }?.first() ?: return null
+            if (first.priority == PRIORITY_ACK && lastWasAck) {
+                (queues[PRIORITY_CONTROL].firstOrNull() ?: queues[PRIORITY_DATA].firstOrNull())?.let { return it }
+            }
+            return first
+        }
+
         private fun startNextFrame() {
             if (writing != null || closed) {
                 return
             }
-            val record = queues.firstOrNull { it.isNotEmpty() }?.first() ?: return
+            val record = nextRecord() ?: return
+            lastWasAck = record.priority == PRIORITY_ACK
             if (record.frames == null && record.priority == PRIORITY_BULK && !tcp && maxFrameSize <= SMALL_FRAME_SIZE) {
                 val wait = upAt + BULK_HOLD_MS - scheduler.now()
                 if (wait > 0) {
@@ -440,8 +490,8 @@ class ProtocolEngine(
             if (record.frames == null) {
                 record.tid = allocateTid()
                 // On TCP a record goes whole, as one frame (TcpStream.FRAME_SIZE).
-                record.viaTcp = tcp
-                record.frames = Frames.split(record.bytes, record.tid, if (tcp) TcpStream.FRAME_SIZE else maxFrameSize)
+                record.viaTcp = tcp && tcpReady
+                record.frames = Frames.split(record.bytes, record.tid, if (record.viaTcp) TcpStream.FRAME_SIZE else maxFrameSize)
             }
             writing = record
             val frame = record.frames!![record.next]
@@ -581,12 +631,47 @@ class ProtocolEngine(
         }
         if (!link.tcp) {
             link.tcp = true
+            link.tcpReady = false
             link.tcpReassembler.reset()
-            host.log("Link $linkId to ${link.deviceId} now sends over TCP")
-            host.onEvent(EngineEvent.PeersChanged)
-            link.resume()
+            host.log("Link $linkId to ${link.deviceId} has TCP; switching once Bluetooth has delivered what it carries")
+            if (!link.bluetoothBusy()) {
+                sendTcpBarrier(link)
+            }
         }
         return true
+    }
+
+    /** The `/ping` that ends the switch to TCP: its ACK means the peer has what Bluetooth carried. */
+    private fun sendTcpBarrier(link: Link) {
+        val msgId = store.nextMsgId()
+        link.tcpBarrier = msgId
+        link.tcpBarrierTimer = scheduler.schedule(TCP_SWITCH_TIMEOUT_MS) {
+            host.log("No answer over Bluetooth on link ${link.id}; switching to TCP anyway")
+            finishTcpSwitch(link)
+        }
+        sendSealed(link, Envelope.Data(msgId, Envelope.FLAG_ACK_REQ, PING_PATH, 0, ByteArray(0)), PRIORITY_ACK)
+    }
+
+    private fun finishTcpSwitch(link: Link) {
+        if (!link.tcp || link.tcpReady || link.closed) {
+            return
+        }
+        link.tcpBarrierTimer?.cancel()
+        link.tcpBarrierTimer = null
+        link.tcpBarrier = 0
+        link.tcpReady = true
+        host.log("Link ${link.id} to ${link.deviceId} now sends over TCP")
+        host.onEvent(EngineEvent.PeersChanged)
+        link.resume()
+    }
+
+    private fun clearTcp(link: Link) {
+        link.tcp = false
+        link.tcpReady = false
+        link.tcpBarrier = 0
+        link.tcpBarrierTimer?.cancel()
+        link.tcpBarrierTimer = null
+        link.tcpReassembler.reset()
     }
 
     /** [linkId]'s TCP connection ended; what it may have swallowed goes again over Bluetooth. */
@@ -616,7 +701,7 @@ class ProtocolEngine(
     /** The established session with [peerId], if any. */
     fun session(peerId: PeerId): SessionInfo? {
         val link = channels[peerId]?.link?.takeIf { it.phase == Phase.ESTABLISHED && !it.closed } ?: return null
-        return SessionInfo(link.id, link.role, link.deviceId, peerId, link.tcp)
+        return SessionInfo(link.id, link.role, link.deviceId, peerId, link.tcpReady)
     }
 
     /**
@@ -626,8 +711,7 @@ class ProtocolEngine(
      * ACKs it swallowed come again the same way, from the peer's own [tcpDown].
      */
     private fun dropTcp(link: Link) {
-        link.tcp = false
-        link.tcpReassembler.reset()
+        clearTcp(link)
         val channel = link.peerId?.let { channels[it] }?.takeIf { it.link === link }
         if (channel != null) {
             val lost = channel.inFlight.values.filter { it.written && it.record?.viaTcp == true }
@@ -643,7 +727,7 @@ class ProtocolEngine(
         if (channel != null && link.phase == Phase.ESTABLISHED) {
             // A `/ping` waiting for its ACK would otherwise count the link as dead.
             link.probes.keys.toList().forEach { msgId ->
-                sendSealed(link, Envelope.Data(msgId, Envelope.FLAG_ACK_REQ, PING_PATH, 0, ByteArray(0)), PRIORITY_CONTROL)
+                sendSealed(link, Envelope.Data(msgId, Envelope.FLAG_ACK_REQ, PING_PATH, 0, ByteArray(0)), PRIORITY_ACK)
             }
             // A CAPS update may have been lost too; it's small.
             sendCaps(channel)
@@ -683,7 +767,7 @@ class ProtocolEngine(
     fun peerSummaries(): List<PeerSummary> = store.peers().map { peer ->
         val channel = channels[peer.peerId]
         val established = channel?.link?.phase == Phase.ESTABLISHED
-        PeerSummary(peer, established, channel?.caps, tcp = established && channel?.link?.tcp == true)
+        PeerSummary(peer, established, channel?.caps, tcp = established && channel?.link?.tcpReady == true)
     }
 
     /** The last CAPS [peerId] sent (kept across its sessions), or null if none yet. */
@@ -1238,7 +1322,8 @@ class ProtocolEngine(
         timer = scheduler.schedule(timeoutMs) { finish(false) }
         link.probes[msgId] = { finish(true) }
         val ping = Envelope.Data(msgId, Envelope.FLAG_ACK_REQ, PING_PATH, 0, ByteArray(0))
-        sendSealed(link, ping, PRIORITY_CONTROL) { written ->
+        // With the ACKs: nothing depends on its order, and it isn't held during a switch to TCP.
+        sendSealed(link, ping, PRIORITY_ACK) { written ->
             if (!written) {
                 finish(false)
             }
@@ -1338,8 +1423,7 @@ class ProtocolEngine(
     private fun endSession(link: Link) {
         if (link.tcp) {
             // The connection belongs to the session (its records are sealed with it).
-            link.tcp = false
-            link.tcpReassembler.reset()
+            clearTcp(link)
             link.moveTcpRecordsToBluetooth()
             host.closeTcp(link.id)
         }
@@ -1423,6 +1507,10 @@ class ProtocolEngine(
     private fun onEnvelope(link: Link, channel: PeerChannel, envelope: Envelope) {
         when (envelope) {
             is Envelope.Ack -> {
+                if (link.tcpBarrier != 0L && envelope.refMsgId == link.tcpBarrier) {
+                    finishTcpSwitch(link)
+                    return
+                }
                 link.probes.remove(envelope.refMsgId)?.let {
                     it()
                     return
