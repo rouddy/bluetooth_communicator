@@ -225,9 +225,10 @@
 - `GattOperationQueue`는 콜백이 오지 않으면 그 링크의 다음 조각을 영원히 기다립니다. 메시지는 TTL이 지나면 실패로 끝나지만, 그 링크는 끊길 때까지 쓸 수 없습니다.
 - 수정 방향: 작업마다 시간 제한(예: 10초)을 두고, 넘으면 실패로 처리하고 링크를 닫습니다.
 
-### 33. 상대 앱이 죽은 뒤 central을 끄면 다시 연결하지 않음 `추정`
-- 이쪽이 peripheral인 세션에서 상대 앱이 죽으면(Galaxy에서는 Bluetooth 연결이 그대로 남음), 이쪽 링크는 상대가 다시 연결해 올 때까지 "연결됨"으로 남습니다. 다시 시작한 상대 앱의 central이 꺼져 있으면, 이쪽도 살아 있는 링크가 있다고 보고 연결하지 않습니다.
-- 수정 방향: peripheral 링크도 주기적으로(또는 스캔에서 상대가 다시 보일 때) `/ping`으로 확인합니다.
+### 33. 상대 앱이 죽은 뒤 central을 끄면 다시 연결하지 않음 `코드` ✅ 해결
+- 해결(2026-11-23): 세션이 맺어진 링크로 상대에게서 60초 동안 아무것도 오지 않으면 `/ping`을 보내고(`IDLE_PROBE_MS`), 10초 안에 답이 없으면 그 링크를 버립니다(central이면 닫고, peripheral이면 쓰지 않음). 그러면 `shouldReconnect`가 다시 참이 되어 이쪽 central이 재연결합니다. 두 엔진 모두. 테스트: `a link whose peer stopped answering is dropped after an idle probe`, `an idle link that answers its probes stays up`.
+- 기기: Fold5를 Jump3의 peripheral로 둔 채 Jump3 앱을 강제 종료하고 central을 끈 채 다시 실행해 보았지만, 강제 종료하자 연결이 바로 끊겨(링크 down) 재현되지 않았습니다. Fold5 central이 11초 뒤 다시 연결했습니다. 조용한 링크가 잘못 끊긴 경우("stopped answering")는 기기 테스트 내내 없었습니다.
+- 원래 내용: 이쪽이 peripheral인 세션에서 상대 앱이 죽으면(Galaxy는 Bluetooth 연결을 붙잡아 둘 수 있음) 이쪽 링크가 "연결됨"으로 남고, 다시 시작한 상대의 central이 꺼져 있으면 이쪽도 살아 있는 링크가 있다고 보고 연결하지 않았습니다. `/ping` 확인은 두 번째 링크가 생겨야만 일어났습니다.
 
 ### 34. Android의 Bluetooth를 껐다 켜면 iPhone과의 연결이 한 번 더 끊김 `확인됨` ✅ 해결
 - 원인(2026-11-23, iPhone HCI 로그와 Fold5 스택 로그로 확인): 재연결 직후 링크가 20바이트 프레임(MTU 교환 전)으로 올라오고, 세션이 맺어지자 Fold5가 재전송할 파일 조각을 20바이트로 잘랐습니다(16 KiB 조각 하나가 820개 notification). Android는 notification을 큐에 넣자마자 `onNotificationSent`를 주므로 앱이 L2CAP 큐(한도 200)를 금방 넘겼고, 혼잡한 동안 Fold5 스택은 iPhone의 Write Request에 대한 응답을 버렸습니다.
@@ -236,7 +237,7 @@
   - 그 연결의 링크 계층 central은 Fold5였습니다(iPhone 역할 peripheral). iPhone의 central 앱 연결은 Fold5가 맺은 연결 위에 올라간 것이었습니다.
 - 해결: 두 엔진이 프레임이 20바이트인 새 링크에서 bulk record(파일 조각)를 최대 3초까지 미루고(`BULK_HOLD_MS`), `setMaxFrameSize`로 커지면 바로 보냅니다(docs/protocol.md 9절). 테스트: 두 엔진의 `a new link at the default MTU holds bulk records until its frames grow`, `a link that keeps the default MTU sends bulk records after the hold`.
 - 확인: 같은 재현을 세 번 해서 Fold5의 혼잡 로그와 30초 뒤 끊김이 한 번도 없었습니다(수정 전에는 다섯 번 중 다섯 번). 받은 1MB 파일의 체크섬이 일치했습니다. 재시작 없는 300KB 전송도 전과 같은 속도였습니다.
-- 남은 것: 재연결 직후 두 링크가 생기면 iPhone-central 링크의 `/ping`이 여전히 3초를 넘겨 그 링크가 교체됩니다(세 번 모두). 혼잡은 아니고, Fold5 L2CAP 큐에 먼저 들어간 파일 조각(최대 약 96개 × 512바이트) 뒤에 ACK가 줄을 서서 늦는 것으로 보입니다. 교체된 뒤에는 Fold5-central 링크(write, 약 7KB/s)로 세션과 전송이 이어집니다. 엔진의 우선순위는 OS 큐에 넘기기 전에만 통하므로, 줄이려면 Android가 한 번에 큐에 넣는 notification 수를 제한해야 합니다.
+- 후속(2026-11-23): 재연결 직후 iPhone-central 링크의 `/ping`이 3초를 넘겨 링크가 교체되던 것(Fold5 L2CAP 큐에 먼저 들어간 파일 조각 뒤에서 ACK가 늦음)도 고쳤습니다. 확인 중에 상대의 인증된 record가 하나라도 오면 답으로 칩니다(앱이 다시 시작된 상대는 그 세션 키로 봉인할 수 없으므로 안전함). 같은 재현에서 확인이 0.63초 만에 끝나 빠른 링크가 남았고, 1MB 전송이 Bluetooth 재시작을 포함해 56초에 끝났습니다(전에는 약 2분).
 - 조사 과정에서 틀린 것으로 확인한 가설: iPhone이 client 연결을 닫아서 끊긴다(남겨 둬도 똑같이 끊김), MTU가 커진 뒤 큰 write가 버려진다(20바이트 write도 막힘). Fold5의 HCI 스누프는 사용자 빌드라 꺼낼 수 없었습니다(파일은 `/data/misc/bluetooth/logs`, 소켓은 열리지 않음).
 
 ### 35. 재연결 직후 링크가 20바이트 프레임으로 맺어짐 `확인됨` ✅ 해결
@@ -251,10 +252,10 @@
 
 ## P3: 구조, 품질
 
-### 23. 메시지 프로토콜 정의 🔶 Android 구현 (`/control/media`, iOS 남음)
+### 23. 메시지 프로토콜 정의 ✅ 해결 (`/control/media`까지)
+- 6단계 `/control/media`(2026-11-23): 기기 화면의 미디어 조작(이전 곡, 재생/일시정지, 다음 곡, 상태 새로고침). Android가 `AudioManager.dispatchMediaKeyEvent`로 키를 누르고 600 ms 뒤 `isMusicActive()`로 상태를 답합니다. iOS는 다른 앱의 재생을 조작할 수 없어서 조작하는 쪽만 하고, CAPS에서 빠져 있습니다(Dart는 iPhone peer에 조작 영역을 숨김). 확인: iPhone SE가 Fold5의 VLC를 상태 확인·일시정지·재생(0.2–0.9초), Fold5의 iPhone 화면에는 조작 영역 없음, 이전 빌드의 Jump3는 업데이트 안내. 다음 곡·이전 곡·정지는 실제 재생 목록으로 확인하지 않았습니다.
 - 구현(2026-10-30): Android에 [docs/protocol.md](docs/protocol.md) 14절의 1–5단계와 7단계를 구현했습니다. Frame, HELLO, 앱 페어링(확인 코드와 양쪽 승인), AUTH, SEALED, peer당 링크 하나, ACK·중복 제거·재전송·TTL·흐름 제어, CAPS, UNPAIR, AIDL 서비스입니다. 채팅 UI는 없애고, 텍스트 시험은 AIDL 테스트 앱(`test_app/`)으로 합니다. 테스트: `protocol/` JVM 테스트(두 엔진을 메모리 안에서 연결). Fold5 ↔ S23에서 페어링, 거절, 재연결(앱 강제 종료, Bluetooth 껐다 켜기), 삭제(UNPAIR), 테스트 앱 양방향(listener와 RECEIVE service, 3,000바이트, 상대가 Bluetooth를 끈 동안 보낸 메시지)을 확인했습니다.
 - 기기에서 찾아 고친 것: 조각 최대 512바이트(MTU 517에서 514바이트 write가 거절됨), 상대 앱이 죽어도 Galaxy에서는 연결이 끊기지 않아 남는 죽은 세션(`/ping`으로 확인), 중복 client 연결을 닫으면 남은 링크까지 끊기는 문제, 이미 연결된 상태로 구독한 central의 MTU.
-- 남은 것: 6단계 `/control/media`, iOS(31번).
 - 설계: [docs/protocol.md](docs/protocol.md).
 - 방향: 텍스트 채팅은 프로토콜 검증용입니다. 실제 목표는 원격 조작(`/control/media`)과, 다른 앱이 AIDL로 상대 폰의 같은 앱과 통신하는 것입니다. 일반 앱은 Wi-Fi 테더링을 제어할 수 없어서 범위에서 뺐습니다. 페어링은 peripheral이 시작하고, peer마다 확인 코드를 보여 주고 사용자 승인을 받습니다.
 - 지금은 UTF-8 바이트만 그대로 보냅니다. 메시지 ID, 타임스탬프, 보낸 기기 이름, 버전, 수신 확인(ack)이 없습니다.
@@ -277,28 +278,28 @@
 - 저장 방식이 바뀌면(예: `SharedPreferencesAsync`/DataStore로 이전) 자동 재연결이 조용히 깨집니다.
 - 수정 방향: 등록 기기 목록을 메서드 채널로 네이티브에 넘기고, 네이티브가 자체 저장소에 보관합니다.
 
-### 26. 테스트
-- 지금은 위젯 스모크 테스트 하나뿐입니다.
-- 수정 방향
-  - `BleAppController`가 MethodChannel과 EventChannel을 주입받게 해서 `_handleEvent`, 등록, 안 읽음, 메시지 상태 로직을 단위 테스트합니다.
-  - 네이티브 쪽은 GATT 작업 큐와 이벤트 중복 제거 로직을 분리해서 테스트합니다.
+### 26. 테스트 ✅ 해결
+- 지금은 Dart 위젯·컨트롤러 테스트(`test/`, 채널을 흉내 내서 `_handleEvent`와 화면 동작), Kotlin JVM 테스트(프로토콜 엔진을 메모리 네트워크와 가상 시계로, GATT 작업 큐, 스캔 제한 등), Swift `RunnerTests`(같은 엔진 테스트의 Swift판), 두 구현이 함께 검사하는 테스트 벡터(`test_vectors/`), 두 폰을 쓰는 통합 테스트(`integration_test/pairing_test.dart`)가 있습니다.
 
-### 27. 포그라운드 서비스 알림
-- 알림을 눌러도 앱이 열리지 않습니다(`contentIntent` 없음).
-- 내용도 내부 상태 문자열(`advertising scanning connected:1`)을 그대로 보여줍니다. 사용자가 이해할 수 있는 문구로 바꿔야 합니다.
+### 27. 포그라운드 서비스 알림 ✅ 해결
+- 해결(2026-11-23): 알림이 "재홍의 Jump3 외 2대와 연결됨", "연결된 기기 없음 · 연결을 기다리는 중", "Bluetooth가 꺼져 있습니다"처럼 상태를 알려 주고, 누르면 앱이 열립니다. 채널 이름은 "백그라운드 연결"입니다. Fold5에서 알림 문구와, 누르면 MainActivity가 앞으로 나오는 것을 확인했습니다.
 
-### 28. 프로젝트 메타데이터
-- `README.md`와 `pubspec.yaml`의 description이 Flutter 템플릿 그대로입니다.
-- Android의 앱 이름(`android:label`)이 `bluetooth_communicator`입니다.
+### 28. 프로젝트 메타데이터 ✅ 해결
+- 해결(2026-11-23): Android 앱 이름을 "Bluetooth Communicator"로(iOS 표시 이름, MaterialApp 제목과 같게), `pubspec.yaml`의 description과 `README.md`를 이 프로젝트 설명으로 바꿨습니다.
 
 ### 37. flutter drive로 돌리면 iPhone peripheral 테스트가 재연결을 보지 못함 `확인됨` ✅ 해결 (36번과 같은 원인으로 보임)
 - 해결(2026-11-23): 36번을 고친 뒤 같은 실행(`pairing_test.dart`, `MODE=sendFile`, `CENTRAL=false`, flutter drive, `--keep-app-running`)이 통과했습니다. 앱이 다시 실행되며 복원된 링크에서 핸드셰이크를 다시 했고, 300KB를 26.5KB/s로 보냈습니다. 이번에는 iPhone이 USB로 연결돼 있었습니다.
 - 2026-11-22의 실패: Fold5는 iPhone과 세션을 맺었다고 기록하는데 iPhone 쪽에는 로그가 오지 않고 화면도 `연결 안 됨`이었습니다(무선 디버깅, 세 번). 복원된 링크가 HELLO를 기다린 것(36번)은 설명되지만, 로그가 전혀 오지 않은 이유는 확인하지 못했습니다.
 - `devicectl`로 설치하고 실행하는 방법(드라이버 없이 테스트가 돌고, `--console`에 네이티브 `[BLE]` 로그가 나옴)은 CLAUDE.md에 있습니다.
 
-### 38. Fold5에 원인 모를 파일 수신 실패 오류가 한 번 남음 `확인됨` (재현 안 됨)
+### 38. Fold5에 원인 모를 파일 수신 실패 오류가 한 번 남음 `확인됨` (재현 안 됨, 로그 추가)
 - 2026-11-23 10:21–10:29 사이 Fold5 설정 화면에 "AlgorigoSE에서 파일을 받지 못했습니다."가 남았습니다. timeout·storage·연결 끊김이 아닌 실패(예: 보낸 쪽이 실패를 알린 `peer`)일 때의 문구입니다. 그 사이 iPhone → Fold5 전송 두 번은 모두 끝났고(체크섬 일치), 둘째 전송 때는 세션이 맺어진 0.75초 뒤 iPhone이 같은 링크에서 핸드셰이크를 한 번 더 했습니다(상태 복원 후 `centralManagerDidUpdateState`가 다시 구독함). 같은 순서로 다시 해 보았지만 재현되지 않았습니다.
-- 메시지 중복 제거는 세션이 바뀌어도 유지되므로(`channel.received`) 같은 OFFER가 두 번 전달되는 경로는 아닙니다. 다시 보이면 Fold5의 `fileTransfer` 이벤트(state, reason, status)를 로그로 남겨 확인합니다.
+- 메시지 중복 제거는 세션이 바뀌어도 유지되므로(`channel.received`) 같은 OFFER가 두 번 전달되는 경로는 아닙니다.
+- 2026-11-23: 두 플랫폼이 실패한 전송을 사유·전달 상태·진행량과 함께 로그로 남깁니다(Android `FileShare` 태그, iOS `[BLE]`). 다시 보이면 이 로그로 원인을 찾습니다. 그 뒤 기기 테스트에서는 다시 나오지 않았습니다.
+
+### 39. 상대 앱을 다시 설치한 직후 재연결이 BAD_MAC으로 끝남 `확인됨` ✅ 해결
+- 확인(2026-11-23): Fold5 앱을 다시 설치한 직후 Fold5(central)가 iPhone에 다시 연결하자, iPhone의 HELLO_p가 7 ms 간격으로 두 번 왔습니다. 둘 다 Fold5의 HELLO_c 하나에 대한 답(같은 nonceC)이었지만 iPhone 쪽 nonce가 달랐습니다. iPhone이 같은 HELLO_c를 두 번 처리하며 다시 답한 것입니다. Fold5는 첫 답으로 AUTH를 만들었고 iPhone은 두 번째 답으로 검증해 BAD_MAC이 됐고, 양쪽 모두 자동 재연결에서 빠져 다시 페어링해야 했습니다. 왜 두 번 처리했는지는 iPhone 로그가 없어 확인하지 못했습니다(다시 해 보았을 때는 재현되지 않음).
+- 해결: peripheral이 지금 답하고 있는 HELLO_c와 nonce가 같은 HELLO_c를 다시 받으면 무시합니다. central은 HELLO_c마다 새 nonce를 쓰므로 같은 메시지가 두 번 온 경우만 해당합니다. 두 엔진 모두. 테스트: `a HELLO delivered twice is answered once`(바꾸기 전에는 BAD_MAC으로 실패).
 
 ---
 
@@ -307,6 +308,8 @@
 코드와 단위 테스트로만 확인하고, 기기 테스트는 건너뛴 내역입니다.
 
 ### 22. 권한 항목 표시 (2026-10-28)
+- 확인함(2026-11-23, Fold5): 알림 권한만 회수하면 제목 `권한`, 부제 `Bluetooth 권한 허용됨`이고 눌러도 반응이 없습니다. 그 아래 `알림 설정 열기`가 나오고, 누르면 앱 정보 화면이 열리며, 알림을 허용하고 돌아오면 사라집니다.
+- 남은 것: 시스템 설정에서 Bluetooth 권한을 허용하는 흐름(앱을 지우고 다시 설치해야 해서 페어링이 모두 사라짐), 권한 요청 대화상자에서 허용하는 경우, Android 12(API 31, 32), iOS(`알림 설정 열기`가 없고 `권한`은 눌러도 반응 없음). 절차는 아래와 같습니다.
 - 준비(Android 13 이상, S23 등): `flutter build apk --debug` 후 `adb install -g build/app/outputs/flutter-apk/app-debug.apk`로 모든 권한을 허용한 상태로 설치하고, `adb shell pm revoke com.rouddy.bluetooth_communicator.bluetooth_communicator android.permission.POST_NOTIFICATIONS`로 알림만 끕니다. S23에는 이 상태로 디버그 빌드가 설치되어 있습니다.
 - 권한 항목: 설정 화면에서 제목이 `권한`, 부제가 `Bluetooth 권한 허용됨`이고, 눌러도 아무 반응이 없어야 합니다.
 - 알림 항목: 그 아래에 `알림 설정 열기`가 보여야 합니다. 누르면 앱 정보 화면이 열리고, 거기서 알림을 켜고 돌아오면 항목이 사라져야 합니다.
@@ -314,9 +317,6 @@
 - 권한 요청 대화상자: 설정 화면의 `권한 요청`으로 뜬 대화상자에서 허용했을 때 오류 없이 `권한`으로 바뀌어야 합니다. 대화상자가 닫히며 앱이 다시 보이는 시점의 재확인은 건너뛰도록 했습니다.
 - Android 12(API 31, 32): 알림이 런타임 권한이 아니므로, 앱 정보에서 알림을 끄면 `알림 설정 열기`가 보이고 다시 켜고 돌아오면 사라져야 합니다. 이 버전의 기기가 있을 때 확인합니다.
 - iOS(RouddySE 등): `알림 설정 열기`는 나오지 않고, `권한` 항목은 눌러도 반응이 없어야 합니다.
-
-### 29. 가로 모드 채팅 화면 (2026-10-28)
-- 채팅 UI를 없애서 더는 필요 없습니다.
 
 ### 파일 전송: iPhone의 화면과 알림 (2026-11-22)
 - 확인한 것: Fold5 ↔ AlgorigoSE에서 양방향 전송을 iPhone이 central일 때와 peripheral일 때 모두 해서 체크섬이 일치했습니다(CLAUDE.md의 알려진 한계 참고).
