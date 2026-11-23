@@ -168,6 +168,28 @@ final class EngineTests: XCTestCase {
     }
   }
 
+  func testAcksThatKeepComingDontHoldAMessageBack() {
+    network.maxFrameSize = 512
+    let connection = pair()
+    b.deliverStatus = nil
+    for i in 0..<ProtocolEngine.maxInFlight {
+      _ = a.send(to: b, Data("m\(i)".utf8))
+    }
+    settle(100)
+    XCTAssertEqual(b.heldDeliveries.count, ProtocolEngine.maxInFlight)
+    let before = connection.frames.count
+
+    // B acknowledges all of them at once and has a message of its own: in practice a
+    // central receiving a file, whose writes crawl, so an ACK was always waiting.
+    b.heldDeliveries.forEach { $0(DeliveryStatus.ok) }
+    let results = b.send(to: a, Data(count: 200))
+    settle()
+
+    let sizes = connection.frames.dropFirst(before).filter { $0.0 === b }.map { $0.1.count }
+    XCTAssertEqual(sizes.firstIndex { $0 > 200 }, 1)
+    XCTAssertEqual(results.value, [DeliveryStatus.ok])
+  }
+
   func testABulkMessageLetsOtherMessagesGoFirst() {
     pair()
 
@@ -356,6 +378,150 @@ final class EngineTests: XCTestCase {
     XCTAssertTrue(a.engine.isConnected(deviceId: b.address))
     XCTAssertEqual(a.pairingRequests.count, 1)
     XCTAssertEqual(b.pairingRequests.count, 1)
+  }
+
+  func testANewLinkAtTheDefaultMtuHoldsBulkRecordsUntilItsFramesGrow() {
+    pair().drop()
+    var framesFromA = 0
+    network.lose = { [unowned self] from, _ in
+      if from === self.a { framesFromA += 1 }
+      return false
+    }
+    let connection = network.connect(a, b)
+    settle(500)
+    let sentBefore = framesFromA
+    var results: [Int] = []
+    _ = a.engine.send(
+      peerId: b.peerId, path: "\(testApp.packageName)/chat", payload: Data(count: 2_000), replyTo: 0, ttlMs: 0, app: testApp,
+      bulk: true
+    ) { results.append($0) }
+    settle(1_000)
+    XCTAssertTrue(b.delivered.isEmpty)
+
+    // The MTU exchange finishes: the record goes out in large frames.
+    a.engine.setMaxFrameSize(linkId: connection.centralLink, maxFrameSize: 512)
+    settle(500)
+
+    XCTAssertEqual(results, [DeliveryStatus.ok])
+    XCTAssertEqual(b.delivered.count, 1)
+    XCTAssertLessThan(framesFromA - sentBefore, 10)
+  }
+
+  func testALinkThatKeepsTheDefaultMtuSendsBulkRecordsAfterTheHold() {
+    pair().drop()
+    network.connect(a, b)
+    settle(500)
+    var results: [Int] = []
+    _ = a.engine.send(
+      peerId: b.peerId, path: "\(testApp.packageName)/chat", payload: Data(count: 200), replyTo: 0, ttlMs: 0, app: testApp,
+      bulk: true
+    ) { results.append($0) }
+    settle(ProtocolEngine.bulkHoldMs - 1_000)
+    XCTAssertTrue(results.isEmpty)
+
+    settle(2_000)
+
+    XCTAssertEqual(results, [DeliveryStatus.ok])
+  }
+
+  func testALinkWhosePeerStoppedAnsweringIsDroppedAfterAnIdleProbe() {
+    let connection = pair()
+    // B's app died; Bluetooth stays connected, so neither link goes down.
+    connection.delivers = false
+
+    settle(ProtocolEngine.idleProbeMs + ProtocolEngine.idleProbeTimeoutMs + 1_000)
+
+    XCTAssertFalse(connection.open)
+    XCTAssertFalse(a.engine.isConnected(deviceId: b.address))
+    XCTAssertFalse(b.engine.isConnected(deviceId: a.address))
+    XCTAssertTrue(a.engine.shouldReconnect(deviceId: b.address))
+    XCTAssertTrue(b.engine.shouldReconnect(deviceId: a.address))
+  }
+
+  func testAnIdleLinkThatAnswersItsProbesStaysUp() {
+    let connection = pair()
+
+    settle(3 * ProtocolEngine.idleProbeMs)
+
+    XCTAssertTrue(connection.open)
+    XCTAssertTrue(a.engine.isConnected(deviceId: b.address))
+    let results = a.send(to: b, Data("still here".utf8))
+    settle()
+    XCTAssertEqual(results.value, [DeliveryStatus.ok])
+  }
+
+  func testAProbeTakesOtherTrafficFromThePeerAsAnAnswer() {
+    network.maxFrameSize = 512
+    let old = pair()
+    // B's ACK to the ping is lost (in practice: stuck behind data it queued), but B
+    // keeps sending on the link.
+    old.dropFrom = b
+    old.dropCount = 1
+    let fresh = network.connect(b, a)
+    scheduler.advance(20)
+    let results = b.send(to: a, Data("chunk".utf8))
+
+    settle(ProtocolEngine.probeTimeoutMs + 1_000)
+
+    XCTAssertTrue(old.open)
+    XCTAssertFalse(fresh.open)
+    XCTAssertEqual(results.value, [DeliveryStatus.ok])
+    XCTAssertTrue(a.engine.isConnected(deviceId: b.address))
+  }
+
+  func testAHelloDeliveredTwiceIsAnsweredOnce() {
+    network.maxFrameSize = 512
+    pair().drop()
+    a.events = []
+    b.events = []
+
+    // A's HELLO_c reaches B twice.
+    let connection = network.connect(a, b) {
+      $0.repeatFrom = self.a
+      $0.repeatCount = 1
+    }
+    settle()
+
+    XCTAssertTrue(connection.open)
+    XCTAssertTrue(a.engine.isConnected(deviceId: b.address))
+    XCTAssertTrue(b.engine.isConnected(deviceId: a.address))
+    XCTAssertEqual(a.store.peers().first?.state, .paired)
+    XCTAssertEqual(b.store.peers().first?.state, .paired)
+  }
+
+  func testARestoredPeripheralAsksTheCentralToStartOver() {
+    let old = pair()
+    let restarted = network.phone("B", b.address, b.peerId)
+    b.store.peers().forEach { restarted.store.update($0) }
+    restarted.store.keys = b.store.keys
+    // B's app restarted and iOS restored A's subscription; A still holds its session.
+    let restored = network.restore(old, as: restarted)
+    let lost = a.send(to: restarted, Data("while B restarted".utf8))
+    settle()
+    XCTAssertFalse(restarted.engine.isConnected(deviceId: a.address))
+    XCTAssertEqual(restarted.delivered.count, 0)
+
+    restarted.engine.requestHandshake(linkId: restored.peripheralLink)
+    settle()
+
+    XCTAssertTrue(a.engine.isConnected(deviceId: b.address))
+    XCTAssertTrue(restarted.engine.isConnected(deviceId: a.address))
+    XCTAssertEqual(lost.value, [DeliveryStatus.ok])
+    let results = restarted.send(to: a, Data("back".utf8))
+    settle()
+    XCTAssertEqual(results.value, [DeliveryStatus.ok])
+  }
+
+  func testAPeripheralOnlyAsksForAHandshakeWithoutASession() {
+    let connection = pair()
+    b.events = []
+
+    b.engine.requestHandshake(linkId: connection.peripheralLink)
+    settle()
+
+    XCTAssertTrue(a.engine.isConnected(deviceId: b.address))
+    XCTAssertTrue(b.engine.isConnected(deviceId: a.address))
+    XCTAssertTrue(b.events.isEmpty)
   }
 
   func testAPeerWhoseAppRestartedUnderALiveConnectionReplacesItsDeadSession() {

@@ -268,6 +268,27 @@ class EngineTest {
     }
 
     @Test
+    fun `ACKs that keep coming don't hold a message back`() {
+        network.maxFrameSize = 512
+        val connection = pair()
+        b.deliverStatus = null
+        repeat(ProtocolEngine.MAX_IN_FLIGHT) { a.send(b, "m$it".toByteArray()) }
+        settle(100)
+        assertEquals(ProtocolEngine.MAX_IN_FLIGHT, b.heldDeliveries.size)
+        val before = connection.bleFrames.size
+
+        // B acknowledges all of them at once and has a message of its own: in practice a
+        // central receiving a file, whose writes crawl, so an ACK was always waiting.
+        b.heldDeliveries.forEach { it(DeliveryStatus.OK) }
+        val results = b.send(a, ByteArray(200))
+        settle()
+
+        val sizes = connection.bleFrames.drop(before).filter { it.first === b }.map { it.second.size }
+        assertEquals(1, sizes.indexOfFirst { it > 200 })
+        assertEquals(listOf(DeliveryStatus.OK), results)
+    }
+
+    @Test
     fun `a bulk message lets other messages go first`() {
         pair()
 
@@ -560,6 +581,152 @@ class EngineTest {
         assertTrue(restarted.engine.isConnected(a.address))
         assertEquals(listOf(DeliveryStatus.OK), a.send(restarted, "hi".toByteArray()).also { settle() })
         assertEquals(1, restarted.delivered.size)
+    }
+
+    @Test
+    fun `a new link at the default MTU holds bulk records until its frames grow`() {
+        pair().drop()
+        var framesFromA = 0
+        network.lose = { from, _ ->
+            if (from === a) framesFromA++
+            false
+        }
+        val connection = network.connect(a, b)
+        settle(500)
+        val sentBefore = framesFromA
+        val results = mutableListOf<Int>()
+        a.engine.send(b.peerId, "${TEST_APP.packageName}/chat", ByteArray(2_000), 0, 0, TEST_APP, bulk = true) {
+            results += it
+        }
+        settle(1_000)
+        assertTrue(b.delivered.isEmpty())
+
+        // The MTU exchange finishes: the record goes out in large frames.
+        a.engine.setMaxFrameSize(connection.centralLink, 512)
+        settle(500)
+
+        assertEquals(listOf(DeliveryStatus.OK), results)
+        assertEquals(1, b.delivered.size)
+        assertTrue("sent ${framesFromA - sentBefore} frames", framesFromA - sentBefore < 10)
+    }
+
+    @Test
+    fun `a link that keeps the default MTU sends bulk records after the hold`() {
+        pair().drop()
+        network.connect(a, b)
+        settle(500)
+        val results = mutableListOf<Int>()
+        a.engine.send(b.peerId, "${TEST_APP.packageName}/chat", ByteArray(200), 0, 0, TEST_APP, bulk = true) {
+            results += it
+        }
+        settle(ProtocolEngine.BULK_HOLD_MS - 1_000)
+        assertTrue(results.isEmpty())
+
+        settle(2_000)
+
+        assertEquals(listOf(DeliveryStatus.OK), results)
+    }
+
+    @Test
+    fun `a link whose peer stopped answering is dropped after an idle probe`() {
+        val connection = pair()
+        // B's app died; Bluetooth stays connected, so neither link goes down.
+        connection.delivers = false
+
+        settle(ProtocolEngine.IDLE_PROBE_MS + ProtocolEngine.IDLE_PROBE_TIMEOUT_MS + 1_000)
+
+        assertFalse(connection.open)
+        assertFalse(a.engine.isConnected(b.address))
+        assertFalse(b.engine.isConnected(a.address))
+        assertTrue(a.engine.shouldReconnect(b.address))
+        assertTrue(b.engine.shouldReconnect(a.address))
+    }
+
+    @Test
+    fun `an idle link that answers its probes stays up`() {
+        val connection = pair()
+
+        settle(3 * ProtocolEngine.IDLE_PROBE_MS)
+
+        assertTrue(connection.open)
+        assertTrue(a.engine.isConnected(b.address))
+        assertEquals(listOf(DeliveryStatus.OK), a.send(b, "still here".toByteArray()).also { settle() })
+    }
+
+    @Test
+    fun `a probe takes other traffic from the peer as an answer`() {
+        network.maxFrameSize = 512
+        val old = pair()
+        // B's ACK to the ping is lost (in practice: stuck behind data it queued), but B
+        // keeps sending on the link.
+        old.dropFrom = b
+        old.dropCount = 1
+        val fresh = network.connect(b, a)
+        scheduler.advance(20)
+        val results = b.send(a, "chunk".toByteArray())
+
+        settle(ProtocolEngine.PROBE_TIMEOUT_MS + 1_000)
+
+        assertTrue(old.open)
+        assertFalse(fresh.open)
+        assertEquals(listOf(DeliveryStatus.OK), results)
+        assertTrue(a.engine.isConnected(b.address))
+    }
+
+    @Test
+    fun `a HELLO delivered twice is answered once`() {
+        network.maxFrameSize = 512
+        pair().drop()
+        a.events.clear()
+        b.events.clear()
+
+        // A's HELLO_c reaches B twice.
+        val connection = network.connect(a, b) {
+            it.repeatFrom = a
+            it.repeatCount = 1
+        }
+        settle()
+
+        assertTrue(connection.open)
+        assertTrue(a.engine.isConnected(b.address))
+        assertTrue(b.engine.isConnected(a.address))
+        assertEquals(PeerState.PAIRED, a.store.peers().single().state)
+        assertEquals(PeerState.PAIRED, b.store.peers().single().state)
+    }
+
+    @Test
+    fun `a restored peripheral asks the central to start over`() {
+        val old = pair()
+        val restarted = network.phone("B", b.address, b.peerId)
+        restarted.store.peerMap.putAll(b.store.peerMap)
+        restarted.store.keys.putAll(b.store.keys)
+        // B's app restarted and iOS restored A's subscription; A still holds its session.
+        val restored = network.restore(old, restarted)
+        val lost = a.send(restarted, "while B restarted".toByteArray())
+        settle()
+        assertFalse(restarted.engine.isConnected(a.address))
+        assertEquals(0, restarted.delivered.size)
+
+        restarted.engine.requestHandshake(restored.peripheralLink)
+        settle()
+
+        assertTrue(a.engine.isConnected(b.address))
+        assertTrue(restarted.engine.isConnected(a.address))
+        assertEquals(listOf(DeliveryStatus.OK), lost)
+        assertEquals(listOf(DeliveryStatus.OK), restarted.send(a, "back".toByteArray()).also { settle() })
+    }
+
+    @Test
+    fun `a peripheral only asks for a handshake without a session`() {
+        val connection = pair()
+        b.events.clear()
+
+        b.engine.requestHandshake(connection.peripheralLink)
+        settle()
+
+        assertTrue(a.engine.isConnected(b.address))
+        assertTrue(b.engine.isConnected(a.address))
+        assertTrue(b.events.isEmpty())
     }
 
     @Test

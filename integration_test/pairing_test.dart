@@ -19,6 +19,13 @@
 //   how long it took; the peer's user approves it.
 // - MODE=receiveFile: approve the next file the peer sends, wait until it's received,
 //   print how long that took, and close the export screen.
+// - MODE=media: on the peer's page, ask whether it's playing, press play/pause twice,
+//   and print the state after each answer (the peer is an Android phone with a player).
+// - MODE=settings: check the settings page's permission tiles (TODO 22: on iOS no
+//   알림 설정 열기, and the granted 권한 tile does nothing when tapped), and that
+//   starting the app reported no advertising error.
+// CENTRAL=false turns scanning off on this phone, so the peer connects to it as
+// central (this phone is the peripheral; the default lets either side connect).
 // CLIP_TEXT puts that text into this phone's clipboard first, for the peer to take.
 // DEVICE_NAME (iOS) sets the name peers see. The phones must already be paired at the
 // OS level, or the system pairing dialogs need a person. LIVE_MINUTES keeps the app
@@ -42,15 +49,16 @@ const _liveMinutes = int.fromEnvironment('LIVE_MINUTES');
 const _clipText = String.fromEnvironment('CLIP_TEXT');
 const _expectClip = String.fromEnvironment('EXPECT_CLIP');
 const _fileSize = int.fromEnvironment('FILE_SIZE', defaultValue: 100000);
+const _central = bool.fromEnvironment('CENTRAL', defaultValue: true);
 
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
   testWidgets('pairs with $_peerName ($_mode)', (tester) async {
-    expect(_peerName.isNotEmpty || _mode == 'setup', isTrue, reason: 'Pass --dart-define=PEER_NAME=…');
+    expect(_peerName.isNotEmpty || _mode == 'setup' || _mode == 'settings', isTrue, reason: 'Pass --dart-define=PEER_NAME=…');
     app.main();
     await pumpUntilFound(tester, find.text('기기 목록'));
-    await ensureBleModesEnabled(tester);
+    await ensureBleModesEnabled(tester, central: _central);
     if (_deviceName.isNotEmpty && app.BleAppController.canSetDeviceName) {
       await setDeviceName(tester, _deviceName);
     }
@@ -59,6 +67,20 @@ void main() {
       await Clipboard.setData(const ClipboardData(text: _clipText));
     }
     if (_mode == 'setup') {
+      return stayLive(tester);
+    }
+    if (_mode == 'settings') {
+      await tester.tap(find.byIcon(Icons.settings));
+      await tester.pumpAndSettle();
+      final granted = find.widgetWithText(ListTile, 'Bluetooth 권한 허용됨');
+      expect(granted, findsOneWidget);
+      expect(find.text('알림 설정 열기'), findsNothing);
+      // Launching starts advertising from two places; only one start may go out.
+      expect(find.textContaining('Advertising failed'), findsNothing);
+      await tester.tap(granted);
+      await tester.pumpAndSettle();
+      expect(find.text('설정'), findsOneWidget);
+      debugPrint('[settings] 권한 tile shown and inert; 알림 설정 열기 absent');
       return stayLive(tester);
     }
     final peer = find.textContaining(_peerName);
@@ -114,6 +136,31 @@ void main() {
       expect(File(transfer.path!).lengthSync(), transfer.size);
       await tester.tap(find.text('닫기'));
       await tester.pumpAndSettle();
+      return stayLive(tester);
+    }
+    if (_mode == 'media') {
+      await pumpUntilFound(tester, peer);
+      await tester.tap(peer.first);
+      await tester.pumpAndSettle();
+      await pumpUntilFound(tester, find.text('상대 기기의 음악·동영상 재생을 조작합니다'), timeout: const Duration(seconds: 60));
+      final page = tester.widget<app.DeviceControlPage>(find.byType(app.DeviceControlPage));
+      final controller = page.controller;
+      final id = page.device.identifier;
+      Future<app.MediaPlayback> press(String tooltip) async {
+        final started = DateTime.now();
+        await tester.tap(find.byTooltip(tooltip));
+        await tester.pump();
+        await pumpUntilGone(tester, find.text('보내는 중…'), timeout: const Duration(seconds: 15));
+        final playback = controller.mediaStates[id]!.playback;
+        debugPrint('[media] $tooltip -> $playback in ${DateTime.now().difference(started).inMilliseconds} ms');
+        return playback;
+      }
+
+      final before = await press('상태 새로고침');
+      final toggle = before == app.MediaPlayback.playing ? '일시정지' : '재생';
+      final after = await press(toggle);
+      expect(after, isNot(before), reason: 'pressing $toggle should change the state');
+      await press(after == app.MediaPlayback.playing ? '일시정지' : '재생');
       return stayLive(tester);
     }
     if (_mode == 'remove') {

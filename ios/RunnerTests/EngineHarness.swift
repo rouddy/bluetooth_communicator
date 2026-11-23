@@ -197,6 +197,14 @@ final class Network {
     var open = true
     /// False when the far end's app died but Bluetooth stayed connected.
     var delivers = true
+    /// The next `dropCount` frames `dropFrom` writes on this connection vanish.
+    var dropFrom: Phone?
+    var dropCount = 0
+    /// The next `repeatCount` frames `repeatFrom` writes on this connection arrive twice.
+    var repeatFrom: Phone?
+    var repeatCount = 0
+    /// The frames each phone wrote, in order.
+    var frames: [(Phone, Data)] = []
 
     init(central: Phone, centralLink: Int, peripheral: Phone, peripheralLink: Int) {
       self.central = central
@@ -229,9 +237,12 @@ final class Network {
   }
 
   @discardableResult
-  func connect(_ central: Phone, _ peripheral: Phone, userInitiated: Bool = false) -> Connection {
+  func connect(
+    _ central: Phone, _ peripheral: Phone, userInitiated: Bool = false, prepare: (Connection) -> Void = { _ in }
+  ) -> Connection {
     let connection = Connection(central: central, centralLink: nextLinkId, peripheral: peripheral, peripheralLink: nextLinkId + 1)
     nextLinkId += 2
+    prepare(connection)
     connections.append(connection)
     peripheral.engine.linkUp(
       linkId: connection.peripheralLink, role: .peripheral, deviceId: central.address, maxFrameSize: maxFrameSize, userInitiated: false)
@@ -239,6 +250,22 @@ final class Network {
       linkId: connection.centralLink, role: .central, deviceId: peripheral.address, maxFrameSize: maxFrameSize,
       userInitiated: userInitiated)
     return connection
+  }
+
+  /// The peripheral's app restarted while Bluetooth stayed connected and iOS restored
+  /// the subscription: `restarted` takes over the peripheral end under a new link, and
+  /// the central's link carries on as if nothing happened.
+  func restore(_ connection: Connection, as restarted: Phone) -> Connection {
+    connection.open = false
+    connections.removeAll { $0 === connection }
+    let restored = Connection(
+      central: connection.central, centralLink: connection.centralLink, peripheral: restarted, peripheralLink: nextLinkId)
+    nextLinkId += 1
+    connections.append(restored)
+    restarted.engine.linkUp(
+      linkId: restored.peripheralLink, role: .peripheral, deviceId: connection.central.address, maxFrameSize: maxFrameSize,
+      userInitiated: false)
+    return restored
   }
 
   private func find(_ phone: Phone, _ linkId: Int) -> Connection {
@@ -249,6 +276,7 @@ final class Network {
 
   func write(from: Phone, linkId: Int, frame: Data) {
     let connection = find(from, linkId)
+    connection.frames.append((from, frame))
     _ = scheduler.schedule(1) { [unowned self] in
       // Like GATT: an attribute value over 512 bytes is rejected.
       if !connection.open || frame.count > Frames.maxFrameSize {
@@ -256,13 +284,24 @@ final class Network {
         return
       }
       from.engine.frameWritten(linkId: linkId, success: true)
+      if connection.dropFrom === from && connection.dropCount > 0 {
+        connection.dropCount -= 1
+        return
+      }
       if !connection.delivers || self.lose(from, frame) {
         return
       }
-      if from === connection.central {
-        connection.peripheral.engine.frameReceived(linkId: connection.peripheralLink, frame: frame)
-      } else {
-        connection.central.engine.frameReceived(linkId: connection.centralLink, frame: frame)
+      var times = 1
+      if connection.repeatFrom === from && connection.repeatCount > 0 {
+        connection.repeatCount -= 1
+        times = 2
+      }
+      for _ in 0..<times {
+        if from === connection.central {
+          connection.peripheral.engine.frameReceived(linkId: connection.peripheralLink, frame: frame)
+        } else {
+          connection.central.engine.frameReceived(linkId: connection.centralLink, frame: frame)
+        }
       }
     }
   }

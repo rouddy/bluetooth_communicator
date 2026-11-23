@@ -6,6 +6,7 @@ import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.PackageManager
 import androidx.core.content.ContextCompat
+import com.rouddy.bluetooth_communicator.bluetooth_communicator.protocol.MediaMessage
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
@@ -84,6 +85,16 @@ class MainActivity : FlutterActivity() {
                             result.error("BAD_ARGS", "deviceId is required", null)
                         } else {
                             BleRuntime.post { ClipboardShare.request(deviceId) }
+                            result.success(null)
+                        }
+                    }
+                    "controlMedia" -> {
+                        val deviceId = call.argument<String>("deviceId")
+                        val op = call.argument<String>("op")?.let { MediaMessage.opOf(it) }
+                        if (deviceId == null || op == null) {
+                            result.error("BAD_ARGS", "deviceId and a known op are required", null)
+                        } else {
+                            BleRuntime.post { MediaControl.request(deviceId, op) }
                             result.success(null)
                         }
                     }

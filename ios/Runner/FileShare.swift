@@ -175,6 +175,15 @@ final class FileShare: NSObject, FileTransferHost, UIDocumentPickerDelegate, UIA
   }
 
   func onTransferChanged(_ transfer: FileTransfer) {
+    if transfer.state == .failed {
+      // Kept for errors seen once that didn't come back (TODO 38).
+      let message =
+        "Transfer \(transfer.id) (\(transfer.outgoing ? "send" : "receive") \(transfer.name)) with \(transfer.peerId) "
+        + "failed: reason=\(transfer.reason ?? "nil") status=\(transfer.status.map(String.init) ?? "nil") "
+        + "after \(transfer.bytes)/\(transfer.size) bytes"
+      NSLog("[BLE] %@", message)
+      emit("log", ["message": message])
+    }
     emit("fileTransfer", event(transfer))
     guard !transfer.outgoing else { return }
     let identifier = "file-\(transfer.id)"

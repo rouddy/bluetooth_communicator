@@ -187,6 +187,17 @@ final class ProtocolEngine {
   static let maxDecryptFailures = 5
   static let retryDelayMs: Int64 = 1_000
   static let probeTimeoutMs: Int64 = 3_000
+  /// An established link that hasn't heard from its peer for this long gets a `/ping`;
+  /// no answer drops it. See Engine.kt (IDLE_PROBE_MS).
+  static let idleProbeMs: Int64 = 60_000
+  /// How long that `/ping` waits: nothing else waits on it, so longer than `probeTimeoutMs`.
+  static let idleProbeTimeoutMs: Int64 = 10_000
+  /// Frames at the default ATT MTU (23), before any MTU exchange.
+  static let smallFrameSize = 20
+  /// How long a new link at `smallFrameSize` holds bulk records (file chunks) back,
+  /// waiting for its MTU to grow. See Engine.kt (BULK_HOLD_MS): 820 notifications per
+  /// chunk congest Android's ATT channel, which then drops responses to the peer's writes.
+  static let bulkHoldMs: Int64 = 3_000
 
   /// A built-in path that only gets an ACK: proof that a link is alive.
   static let pingPath = "/ping"
@@ -267,6 +278,9 @@ final class ProtocolEngine {
     let userInitiated: Bool
     var maxFrameSize: Int
     unowned let host: EngineHost
+    private let scheduler: EngineScheduler
+    private let upAt: Int64
+    private var bulkHold: Cancellable?
 
     let reassembler = FrameReassembler(maxRecordSize: maxMessageBytes)
     var phase = Phase.awaitHello
@@ -277,6 +291,9 @@ final class ProtocolEngine {
     var pairing: Pairing?
     var session: Session?
     var handshakeTimer: Cancellable?
+    var idleTimer: Cancellable?
+    /// When the peer last sent something authenticated on this link.
+    var lastHeardAt: Int64 = 0
     var closed = false
 
     /// HELLOs received; a deferred decision about an older HELLO is dropped.
@@ -299,14 +316,22 @@ final class ProtocolEngine {
     private var pumping = false
     private var pumpAgain = false
 
-    init(id: Int, role: Role, deviceId: String, userInitiated: Bool, maxFrameSize: Int, host: EngineHost) {
+    init(
+      id: Int, role: Role, deviceId: String, userInitiated: Bool, maxFrameSize: Int, host: EngineHost,
+      scheduler: EngineScheduler
+    ) {
       self.id = id
       self.role = role
       self.deviceId = deviceId
       self.userInitiated = userInitiated
       self.maxFrameSize = maxFrameSize
       self.host = host
+      self.scheduler = scheduler
+      upAt = scheduler.now()
     }
+
+    /// The frame size grew: a held bulk record may start now.
+    func resume() { pump() }
 
     func enqueue(_ record: OutgoingRecord) {
       queues[record.priority].append(record)
@@ -330,6 +355,8 @@ final class ProtocolEngine {
     }
 
     func failAll() {
+      bulkHold?.cancel()
+      bulkHold = nil
       let records = queues.flatMap { $0 }
       queues = [[OutgoingRecord]](repeating: [], count: ProtocolEngine.priorityCount)
       writing = nil
@@ -359,10 +386,40 @@ final class ProtocolEngine {
       } while pumpAgain
     }
 
+    /// Whether the last frame started was an ACK's.
+    private var lastWasAck = false
+
+    /// The head of the highest priority, except that ACKs take turns with commands and
+    /// messages: a central receiving a file always had an ACK waiting (its writes crawl
+    /// while the peer's notifications congest the link), and messages behind the ACKs
+    /// expired unsent. File chunks still wait for everything else.
+    private func nextRecord() -> OutgoingRecord? {
+      guard let first = queues.first(where: { !$0.isEmpty })?.first else { return nil }
+      if first.priority == ProtocolEngine.priorityAck && lastWasAck,
+        let other = queues[ProtocolEngine.priorityControl].first ?? queues[ProtocolEngine.priorityData].first
+      {
+        return other
+      }
+      return first
+    }
+
     private func startNextFrame() {
-      guard writing == nil, !closed,
-        let record = queues.first(where: { !$0.isEmpty })?.first
-      else { return }
+      guard writing == nil, !closed, let record = nextRecord() else { return }
+      lastWasAck = record.priority == ProtocolEngine.priorityAck
+      if record.frames == nil, record.priority == ProtocolEngine.priorityBulk,
+        maxFrameSize <= ProtocolEngine.smallFrameSize
+      {
+        let wait = upAt + ProtocolEngine.bulkHoldMs - scheduler.now()
+        if wait > 0 {
+          if bulkHold == nil {
+            bulkHold = scheduler.schedule(wait) { [weak self] in
+              self?.bulkHold = nil
+              self?.pump()
+            }
+          }
+          return
+        }
+      }
       if record.frames == nil {
         record.tid = allocateTid()
         record.frames = Frames.split(record.bytes, tid: record.tid, maxFrameSize: maxFrameSize)
@@ -459,7 +516,8 @@ final class ProtocolEngine {
     }
     let link = Link(
       id: linkId, role: role, deviceId: deviceId, userInitiated: userInitiated,
-      maxFrameSize: min(max(maxFrameSize, Frames.minFrameSize), Frames.maxFrameSize), host: host)
+      maxFrameSize: min(max(maxFrameSize, Frames.minFrameSize), Frames.maxFrameSize), host: host,
+      scheduler: scheduler)
     links[linkId] = link
     host.log("Link \(linkId) up: \(role.rawValue) to \(deviceId), frames of \(link.maxFrameSize) bytes, user=\(userInitiated)")
     if role == .central {
@@ -473,7 +531,26 @@ final class ProtocolEngine {
 
   /// The ATT MTU changed; frames split from now on use the new size.
   func setMaxFrameSize(linkId: Int, maxFrameSize: Int) {
-    links[linkId]?.maxFrameSize = min(max(maxFrameSize, Frames.minFrameSize), Frames.maxFrameSize)
+    guard let link = links[linkId] else { return }
+    let size = min(max(maxFrameSize, Frames.minFrameSize), Frames.maxFrameSize)
+    guard size != link.maxFrameSize else { return }
+    link.maxFrameSize = size
+    host.log("Link \(linkId) now uses frames of \(size) bytes")
+    link.resume()
+  }
+
+  /// A peripheral link that came back without its session: iOS state restoration
+  /// revives the subscription of a central that was talking to the app's previous
+  /// process. That central still holds its session, so it won't send HELLO_c; a HELLO
+  /// of ours makes it drop the session and start over (6.5).
+  func requestHandshake(linkId: Int) {
+    guard let link = links[linkId], !link.closed, link.role == .peripheral,
+      link.phase == .awaitHello || link.phase == .done
+    else { return }
+    host.log("Asking the central on link \(linkId) to start over")
+    link.phase = .awaitHello
+    sendRecord(link, ownHello(nonce: randomNonce(), nonceC: nil), ProtocolEngine.priorityHandshake)
+    armHandshakeTimer(link)
   }
 
   func frameReceived(linkId: Int, frame: Data) {
@@ -555,6 +632,7 @@ final class ProtocolEngine {
     host.log("Link \(link.id) to \(link.deviceId) down (\(link.phase.rawValue))")
     link.closed = true
     link.handshakeTimer?.cancel()
+    link.idleTimer?.cancel()
     if let pairing = link.pairing {
       pairing.approvalTimer?.cancel()
       // The UI is showing (or may show) its approval prompt; dismiss it.
@@ -662,6 +740,15 @@ final class ProtocolEngine {
   private func onHello(_ link: Link, _ hello: Hello, _ bytes: Data) {
     if hello.peerId == store.localPeerId {
       host.log("Ignored a HELLO with this phone's own peerId")
+      return
+    }
+    if link.role == .peripheral, let previous = link.peerHello, previous.nonce == hello.nonce,
+      link.phase == .awaitHello || link.phase == .awaitAuth
+    {
+      // The HELLO_c we're answering, delivered twice (a central sends each with a new
+      // nonce). Answering it again with a new nonce would make the AUTH the central
+      // computes from our first answer fail as BAD_MAC (seen with an iPhone).
+      host.log("Ignored a repeated HELLO on link \(link.id)")
       return
     }
     link.helloCount += 1
@@ -1016,8 +1103,9 @@ final class ProtocolEngine {
     }
   }
 
-  /// Sends a `/ping` on `link`; `done` gets whether its ACK came back in time.
-  private func probe(_ link: Link, _ done: @escaping (Bool) -> Void) {
+  /// Sends a `/ping` on `link`; `done` gets whether the peer answered in time. Any
+  /// authenticated record from the peer counts as an answer (see Engine.kt).
+  private func probe(_ link: Link, timeoutMs: Int64 = ProtocolEngine.probeTimeoutMs, _ done: @escaping (Bool) -> Void) {
     let msgId = store.nextMsgId()
     var finished = false
     var timer: Cancellable?
@@ -1028,13 +1116,37 @@ final class ProtocolEngine {
       link.probes.removeValue(forKey: msgId)
       done(alive)
     }
-    timer = scheduler.schedule(ProtocolEngine.probeTimeoutMs) { finish(false) }
+    timer = scheduler.schedule(timeoutMs) { finish(false) }
     link.probes[msgId] = { finish(true) }
     let ping = DataEnvelope(
       msgId: msgId, flags: Envelope.flagAckReq, path: ProtocolEngine.pingPath, replyTo: 0, payload: Data())
-    sendSealed(link, .data(ping), ProtocolEngine.priorityControl) { written in
+    // With the ACKs: nothing depends on its order.
+    sendSealed(link, .data(ping), ProtocolEngine.priorityAck) { written in
       if !written {
         finish(false)
+      }
+    }
+  }
+
+  /// Pings `link` once its peer has been quiet for `idleProbeMs`; drops it if that goes unanswered.
+  private func armIdleProbe(_ link: Link, delayMs: Int64 = ProtocolEngine.idleProbeMs) {
+    link.idleTimer?.cancel()
+    link.idleTimer = scheduler.schedule(delayMs) { [unowned self] in
+      link.idleTimer = nil
+      guard !link.closed, link.phase == .established else { return }
+      let quietFor = self.scheduler.now() - link.lastHeardAt
+      if quietFor < ProtocolEngine.idleProbeMs {
+        self.armIdleProbe(link, delayMs: ProtocolEngine.idleProbeMs - quietFor)
+        return
+      }
+      self.probe(link, timeoutMs: ProtocolEngine.idleProbeTimeoutMs) { [unowned self] alive in
+        guard !link.closed, link.phase == .established else { return }
+        if alive {
+          self.armIdleProbe(link)
+        } else {
+          self.host.log("Link \(link.id) to \(link.deviceId) stopped answering; dropping it")
+          self.dropDead(link)
+        }
       }
     }
   }
@@ -1077,6 +1189,8 @@ final class ProtocolEngine {
       receiveKey: Derivation.sessionKey(key, from: peerId, to: store.localPeerId, tHello: tHello))
     link.phase = .established
     host.log("Session with \(link.deviceId) on link \(link.id) (\(link.role.rawValue))")
+    link.lastHeardAt = scheduler.now()
+    armIdleProbe(link)
     let hello = link.peerHello!
     let stored = store.peers().first { $0.peerId == peerId }
     let updated = StoredPeer(
@@ -1158,6 +1272,10 @@ final class ProtocolEngine {
     }
     session.decryptFailures = 0
     session.window.mark(counter)
+    link.lastHeardAt = scheduler.now()
+    if !link.probes.isEmpty {
+      Array(link.probes.values).forEach { $0() }
+    }
     let envelope: Envelope
     do {
       envelope = try Envelope.decode(plain)

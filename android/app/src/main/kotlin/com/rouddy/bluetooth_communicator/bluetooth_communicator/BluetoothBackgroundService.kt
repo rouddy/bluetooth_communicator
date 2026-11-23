@@ -184,7 +184,7 @@ class BluetoothBackgroundService : Service(), BleTransport {
         try {
             startForeground(
                 NOTIFICATION_ID,
-                buildNotification("Running"),
+                buildNotification("시작하는 중"),
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
             )
         } catch (e: Exception) {
@@ -633,6 +633,20 @@ class BluetoothBackgroundService : Service(), BleTransport {
     // the server never hears onMtuChanged; use what the client side learned.
     private fun attMtu(address: String) = clientMtus[address] ?: centralMtus[address] ?: DEFAULT_ATT_MTU
 
+    // A write of n bytes means the MTU is at least n + 3. The server misses
+    // onMtuChanged when the exchange happens before it's registered (an iPhone
+    // reconnecting right after Bluetooth comes back on), which left links at 20-byte
+    // frames; the central's frames, sized by its own MTU, tell us instead.
+    private fun learnMtuFromWrite(address: String, size: Int) {
+        val mtu = size + 3
+        if (mtu <= attMtu(address)) {
+            return
+        }
+        centralMtus[address] = mtu
+        serverLinkIds[address]?.let { engine.setMaxFrameSize(it, Frames.frameSize(mtu)) }
+        clientLinkIds[address]?.let { engine.setMaxFrameSize(it, Frames.frameSize(mtu)) }
+    }
+
     // BleTransport: the engine's frames go out as a characteristic write (we're the
     // central) or a notification (we're the peripheral), one GATT operation at a time.
     override fun writeFrame(linkId: Int, frame: ByteArray) {
@@ -838,45 +852,29 @@ class BluetoothBackgroundService : Service(), BleTransport {
 
     private fun emitStatus() {
         // Peers with a session, over both roles.
-        val connectionCount = engine.connectedSessions().map { it.deviceId }.toSet().size
-        val status = when {
-            adapter?.state != BluetoothAdapter.STATE_ON -> STATUS_BLUETOOTH_OFF
-            connectionCount > 0 -> {
-                buildString {
-                    if (isAdvertising) {
-                        append("advertising ")
-                    }
-                    if (isScanning) {
-                        append("scanning ")
-                    }
-                    append("connected:$connectionCount")
-                }.trim()
-            }
-            isAdvertising || isScanning -> {
-                buildString {
-                    if (isAdvertising) {
-                        append("advertising ")
-                    }
-                    if (isScanning) {
-                        append("scanning ")
-                    }
-                }.trim()
-            }
-            else -> "idle"
-        }
-        // Structured, so both platforms report the same thing (Dart builds the label);
-        // the string above is only the foreground-service notification text.
+        val sessions = engine.connectedSessions().distinctBy { it.deviceId }
+        val bluetoothOn = adapter?.state == BluetoothAdapter.STATE_ON
+        // Structured, so both platforms report the same thing (Dart builds the label).
         BleEventBus.emit(
             mapOf(
                 "type" to "status",
                 "advertising" to isAdvertising,
                 "scanning" to isScanning,
-                "connectedCount" to connectionCount,
-                "bluetoothOn" to (adapter?.state == BluetoothAdapter.STATE_ON)
+                "connectedCount" to sessions.size,
+                "bluetoothOn" to bluetoothOn
             )
         )
-        updateNotification(status)
+        val text = when {
+            !bluetoothOn -> "Bluetooth가 꺼져 있습니다"
+            sessions.size == 1 -> "${displayName(sessions[0])}와(과) 연결됨"
+            sessions.size > 1 -> "${displayName(sessions[0])} 외 ${sessions.size - 1}대와 연결됨"
+            isAdvertising || isScanning -> "연결된 기기 없음 · 연결을 기다리는 중"
+            else -> "광고와 스캔이 꺼져 있습니다"
+        }
+        updateNotification(text)
     }
+
+    private fun displayName(session: EngineEvent.Connected) = session.name.ifBlank { session.deviceId }
 
     private fun updateNotification(content: String) {
         val manager = getSystemService(NotificationManager::class.java)
@@ -884,10 +882,17 @@ class BluetoothBackgroundService : Service(), BleTransport {
     }
 
     private fun buildNotification(content: String): Notification {
+        val openApp = PendingIntent.getActivity(
+            this,
+            0,
+            Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
         return NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
             .setContentTitle("Bluetooth Communicator")
             .setContentText(content)
             .setSmallIcon(android.R.drawable.stat_sys_data_bluetooth)
+            .setContentIntent(openApp)
             .setOngoing(true)
             .build()
     }
@@ -895,7 +900,7 @@ class BluetoothBackgroundService : Service(), BleTransport {
     private fun createNotificationChannel() {
         val channel = NotificationChannel(
             NOTIFICATION_CHANNEL_ID,
-            "Bluetooth background service",
+            "백그라운드 연결",
             NotificationManager.IMPORTANCE_LOW
         )
         val manager = getSystemService(NotificationManager::class.java)
@@ -1338,6 +1343,7 @@ class BluetoothBackgroundService : Service(), BleTransport {
                 if (!serverLinkIds.containsKey(address) && subscribedCentrals.containsKey(address)) {
                     serverLinkUp(address)
                 }
+                learnMtuFromWrite(address, frame.size)
                 serverLinkIds[address]?.let { engine.frameReceived(it, frame) }
             }
         }
@@ -1410,7 +1416,6 @@ class BluetoothBackgroundService : Service(), BleTransport {
 
         // Status reported while the adapter is off; Dart shows a banner for it. iOS uses the
         // same string.
-        const val STATUS_BLUETOOTH_OFF = "bluetooth-off"
 
         private const val PREFS_NAME = "ble_service_prefs"
         private const val PREF_ADVERTISING = "pref_advertising"

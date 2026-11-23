@@ -68,6 +68,16 @@ import UIKit
         let args = call.arguments as? [String: Any]
         self.bleManager.requestClipboard(args?["deviceId"] as? String)
         result(nil)
+      case "controlMedia":
+        let args = call.arguments as? [String: Any]
+        guard let deviceId = args?["deviceId"] as? String,
+          let op = (args?["op"] as? String).flatMap(MediaMessage.op(named:))
+        else {
+          result(FlutterError(code: "BAD_ARGS", message: "deviceId and a known op are required", details: nil))
+          return
+        }
+        self.bleManager.controlMedia(deviceId, op: op)
+        result(nil)
       case "setClipboardSharing":
         let args = call.arguments as? [String: Any]
         self.bleManager.setClipboardSharing((args?["enabled"] as? Bool) ?? true)
@@ -212,6 +222,9 @@ final class IOSBleBackgroundManager: NSObject, FlutterStreamHandler, EngineHost 
   private var serviceAdded = false
   private var addingService = false
   private var subscribedCentrals: [UUID: CBCentral] = [:]
+  // Centrals whose subscription state restoration revived. They were talking to the
+  // app's previous process, so once Bluetooth is on they're asked to start over.
+  private var restoredCentrals: Set<UUID> = []
   private var pendingNotifications: [(linkId: Int, data: Data, central: CBCentral)] = []
 
   private var advertisingEnabled = false
@@ -219,6 +232,11 @@ final class IOSBleBackgroundManager: NSObject, FlutterStreamHandler, EngineHost 
   // What's reported in `status`. Tracked from delegate callbacks rather than read off
   // the managers: they're lazy, and touching them early shows the Bluetooth prompt.
   private var isAdvertising = false
+  // A start is on its way (startAdvertising until didStartAdvertising). isAdvertising
+  // only turns true in that callback, so without this the launch's restoreState and
+  // Dart's setAdvertisingEnabled both started it, and the second failed with
+  // "Advertising has already started".
+  private var advertisingStarting = false
   private var isScanning = false
   private var bluetoothOn = true
 
@@ -268,6 +286,7 @@ final class IOSBleBackgroundManager: NSObject, FlutterStreamHandler, EngineHost 
     } else {
       peripheralManager.stopAdvertising()
       isAdvertising = false
+      advertisingStarting = false
       peripheralManager.removeAllServices()
       resetPeripheralRole()
       emitStatus()
@@ -307,6 +326,7 @@ final class IOSBleBackgroundManager: NSObject, FlutterStreamHandler, EngineHost 
     if isAdvertising {
       peripheralManager.stopAdvertising()
       isAdvertising = false
+      advertisingStarting = false
       startAdvertisingIfPossible()
     }
   }
@@ -461,8 +481,14 @@ final class IOSBleBackgroundManager: NSObject, FlutterStreamHandler, EngineHost 
       else { return failWrite(linkId) }
       // Answered by didWriteValueFor; the engine has at most one frame out per link.
       peripheral.writeValue(frame, for: characteristic, type: .withResponse)
+      // A link can come up before the MTU exchange (seen right after a reconnect),
+      // with 20-byte frames. CoreBluetooth has no callback for the exchange, so look
+      // again with each frame.
+      engine.setMaxFrameSize(
+        linkId: linkId, maxFrameSize: Frames.frameSize(packetLength: peripheral.maximumWriteValueLength(for: .withoutResponse)))
     case .server(let uuid):
       guard let central = subscribedCentrals[uuid], frameCharacteristic != nil else { return failWrite(linkId) }
+      engine.setMaxFrameSize(linkId: linkId, maxFrameSize: Frames.frameSize(packetLength: central.maximumUpdateValueLength))
       pendingNotifications.append((linkId: linkId, data: frame, central: central))
       flushNotifications()
     case nil:
@@ -544,7 +570,85 @@ final class IOSBleBackgroundManager: NSObject, FlutterStreamHandler, EngineHost 
       }
       return
     }
+    // iOS only sends media commands; a request gets UNSUPPORTED below.
+    if data.path == MediaMessage.path, data.isReply {
+      onMediaReply(data)
+      done(DeliveryStatus.ok)
+      return
+    }
     done(data.path.hasPrefix("/") ? DeliveryStatus.unsupported : DeliveryStatus.noReceiver)
+  }
+
+  // MARK: - Media keys (/control/media, 10절)
+
+  /// How long our command waits for the answer; also its TTL.
+  private let mediaTimeoutMs: Int64 = 10_000
+  /// Our commands waiting for their answer, by msgId.
+  private var mediaRequests: [UInt32: (deviceId: String, op: Int, timeout: DispatchWorkItem)] = [:]
+
+  /// Presses `op` on the peer at `deviceId`; answered by a `mediaControl` event.
+  func controlMedia(_ deviceId: String, op: Int) {
+    guard let peerId = peerId(forDevice: deviceId) else {
+      return emitMedia(deviceId, op, "undelivered", status: DeliveryStatus.expiredNotSent)
+    }
+    // A peer that told us what it supports and left this out (another iPhone) can't do it.
+    if let caps = engine.capsOf(peerId), !caps.builtins.contains(MediaMessage.path) {
+      return emitMedia(deviceId, op, "unsupported")
+    }
+    var msgId: UInt32 = 0
+    var failedEarly: Int?
+    msgId = engine.send(
+      peerId: peerId, path: MediaMessage.path, payload: MediaMessage.request(op), replyTo: 0, ttlMs: mediaTimeoutMs,
+      app: nil
+    ) { [weak self] status in
+      guard status != DeliveryStatus.ok else { return }
+      // A local failure can come before send returns the msgId.
+      if msgId == 0 {
+        failedEarly = status
+      } else if let self, let request = self.finishMedia(msgId) {
+        self.emitMediaFailure(request.deviceId, request.op, status)
+      }
+    }
+    if let failedEarly {
+      return emitMediaFailure(deviceId, op, failedEarly)
+    }
+    guard msgId != 0 else {
+      return emitMedia(deviceId, op, "undelivered", status: DeliveryStatus.malformed)
+    }
+    let id = msgId
+    let timeout = DispatchWorkItem { [weak self] in
+      guard let self, let request = self.finishMedia(id) else { return }
+      self.emitMedia(request.deviceId, request.op, "timeout")
+    }
+    mediaRequests[id] = (deviceId: deviceId, op: op, timeout: timeout)
+    DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(Int(mediaTimeoutMs)), execute: timeout)
+  }
+
+  private func onMediaReply(_ data: DataEnvelope) {
+    guard let reply = MediaMessage.decodeReply(data.payload), let request = finishMedia(data.replyTo) else { return }
+    emitMedia(
+      request.deviceId, request.op, MediaMessage.resultName(reply.result), state: MediaMessage.stateName(reply.state))
+  }
+
+  private func finishMedia(_ msgId: UInt32) -> (deviceId: String, op: Int)? {
+    guard let request = mediaRequests.removeValue(forKey: msgId) else { return nil }
+    request.timeout.cancel()
+    return (request.deviceId, request.op)
+  }
+
+  private func emitMediaFailure(_ deviceId: String, _ op: Int, _ status: Int) {
+    if status == DeliveryStatus.unsupported {
+      emitMedia(deviceId, op, "unsupported")
+    } else {
+      emitMedia(deviceId, op, "undelivered", status: status)
+    }
+  }
+
+  private func emitMedia(_ deviceId: String, _ op: Int, _ result: String, state: String? = nil, status: Int? = nil) {
+    var payload: [String: Any] = ["deviceId": deviceId, "op": MediaMessage.opName(op), "result": result]
+    payload["state"] = state
+    payload["status"] = status
+    emit(type: "mediaControl", payload: payload)
   }
 
   // MARK: - Clipboard (/clipboard, 10절)
@@ -799,7 +903,16 @@ final class IOSBleBackgroundManager: NSObject, FlutterStreamHandler, EngineHost 
       addFrameServiceIfNeeded()
       return
     }
-    guard !peripheralManager.isAdvertising else { return }
+    if peripheralManager.isAdvertising {
+      // State restoration hands the manager back still advertising.
+      if !isAdvertising {
+        isAdvertising = true
+        emitStatus()
+      }
+      return
+    }
+    guard !advertisingStarting else { return }
+    advertisingStarting = true
     peripheralManager.startAdvertising([
       CBAdvertisementDataServiceUUIDsKey: [serviceUUID],
       CBAdvertisementDataLocalNameKey: deviceName,
@@ -988,9 +1101,14 @@ extension IOSBleBackgroundManager: CBPeripheralManagerDelegate {
       if advertisingEnabled {
         startAdvertisingIfPossible()
       }
+      let restored = restoredCentrals
+      restoredCentrals.removeAll()
+      restored.compactMap { serverLinkIds[$0] }.forEach { engine.requestHandshake(linkId: $0) }
     case .poweredOff:
+      restoredCentrals.removeAll()
       resetPeripheralRole()
       isAdvertising = false
+      advertisingStarting = false
       bluetoothOn = false
       emitStatus()
     default:
@@ -1007,9 +1125,12 @@ extension IOSBleBackgroundManager: CBPeripheralManagerDelegate {
     if let characteristic {
       frameCharacteristic = characteristic
       serviceAdded = true
-      // Their sessions died with the old process; a new HELLO_c revives each link.
+      // Their sessions died with the old process, but they don't know: the service
+      // didn't change, so they won't send a new HELLO_c on their own. Once powered on,
+      // each is asked to start over (requestHandshake, 6.5).
       characteristic.subscribedCentrals?.forEach {
         subscribedCentrals[$0.identifier] = $0
+        restoredCentrals.insert($0.identifier)
         serverLinkUp($0.identifier)
       }
     }
@@ -1029,7 +1150,9 @@ extension IOSBleBackgroundManager: CBPeripheralManagerDelegate {
   }
 
   func peripheralManagerDidStartAdvertising(_ peripheral: CBPeripheralManager, error: Error?) {
-    if let error {
+    advertisingStarting = false
+    // Already advertising is what we wanted.
+    if let error, (error as? CBError)?.code != .alreadyAdvertising {
       emit(type: "error", payload: ["message": "Advertising failed: \(error.localizedDescription)"])
       return
     }

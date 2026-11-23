@@ -47,16 +47,18 @@ String backgroundStatus(WidgetTester tester) {
 }
 
 /// Turns on advertising and scanning in the settings page if they're off (a
-/// fresh install starts with both off), then returns to the device list.
-Future<void> ensureBleModesEnabled(WidgetTester tester) async {
+/// fresh install starts with both off), then returns to the device list. With
+/// `central: false` scanning is turned off instead, so peers can only reach this
+/// phone as its centrals.
+Future<void> ensureBleModesEnabled(WidgetTester tester, {bool central = true}) async {
   await tester.tap(find.byIcon(Icons.settings));
   await tester.pumpAndSettle();
-  for (final title in [
-    'Bluetooth peripheral advertising',
-    'Bluetooth device scan 및 연결',
+  for (final (title, on) in [
+    ('Bluetooth peripheral advertising', true),
+    ('Bluetooth device scan 및 연결', central),
   ]) {
     final toggle = find.widgetWithText(SwitchListTile, title);
-    if (!tester.widget<SwitchListTile>(toggle).value) {
+    if (tester.widget<SwitchListTile>(toggle).value != on) {
       await tester.tap(toggle);
       await tester.pumpAndSettle();
     }

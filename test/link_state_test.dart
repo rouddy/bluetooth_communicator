@@ -97,4 +97,38 @@ void main() {
     expect(find.text('연결 안 됨'), findsOneWidget);
     expect(find.widgetWithText(FilledButton, '연결'), findsOneWidget);
   });
+
+  testWidgets('a session on TCP shows as connected over Wi-Fi', (tester) async {
+    await openDevicePage(tester);
+
+    Future<void> peers({required bool tcp}) async {
+      await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+        _eventsChannel.name,
+        const StandardMethodCodec().encodeSuccessEnvelope({
+          'type': 'peers',
+          'peers': [
+            {
+              'deviceId': 'AA:AA',
+              'peerId': 'peer-a',
+              'name': 'Peer',
+              'platform': 1,
+              'state': 'paired',
+              'connected': true,
+              'tcp': tcp,
+            },
+          ],
+        }),
+        (_) {},
+      );
+      await tester.pump();
+    }
+
+    await peers(tcp: true);
+    expect(find.text('연결됨 · Wi-Fi'), findsOneWidget);
+    expect(find.byIcon(Icons.wifi), findsOneWidget);
+
+    await peers(tcp: false);
+    expect(find.text('연결됨 · Wi-Fi'), findsNothing);
+    expect(find.byIcon(Icons.bluetooth_connected), findsOneWidget);
+  });
 }
