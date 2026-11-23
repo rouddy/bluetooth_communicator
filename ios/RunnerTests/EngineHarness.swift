@@ -197,6 +197,9 @@ final class Network {
     var open = true
     /// False when the far end's app died but Bluetooth stayed connected.
     var delivers = true
+    /// The next `dropCount` frames `dropFrom` writes on this connection vanish.
+    var dropFrom: Phone?
+    var dropCount = 0
 
     init(central: Phone, centralLink: Int, peripheral: Phone, peripheralLink: Int) {
       self.central = central
@@ -272,6 +275,10 @@ final class Network {
         return
       }
       from.engine.frameWritten(linkId: linkId, success: true)
+      if connection.dropFrom === from && connection.dropCount > 0 {
+        connection.dropCount -= 1
+        return
+      }
       if !connection.delivers || self.lose(from, frame) {
         return
       }

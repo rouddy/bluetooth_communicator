@@ -162,6 +162,10 @@ class Network(private val scheduler: FakeScheduler) {
         /** False when the far end's app died but Bluetooth stayed connected. */
         var delivers = true
 
+        /** The next [dropCount] frames [dropFrom] writes on this connection vanish. */
+        var dropFrom: Phone? = null
+        var dropCount = 0
+
         fun drop() {
             if (!open) {
                 return
@@ -217,6 +221,10 @@ class Network(private val scheduler: FakeScheduler) {
                 return@schedule
             }
             from.engine.frameWritten(linkId, true)
+            if (connection.dropFrom === from && connection.dropCount > 0) {
+                connection.dropCount--
+                return@schedule
+            }
             if (!connection.delivers || lose(from, frame)) {
                 return@schedule
             }

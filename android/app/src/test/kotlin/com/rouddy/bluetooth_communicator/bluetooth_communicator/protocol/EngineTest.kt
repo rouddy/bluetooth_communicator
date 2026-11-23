@@ -607,6 +607,52 @@ class EngineTest {
     }
 
     @Test
+    fun `a link whose peer stopped answering is dropped after an idle probe`() {
+        val connection = pair()
+        // B's app died; Bluetooth stays connected, so neither link goes down.
+        connection.delivers = false
+
+        settle(ProtocolEngine.IDLE_PROBE_MS + ProtocolEngine.IDLE_PROBE_TIMEOUT_MS + 1_000)
+
+        assertFalse(connection.open)
+        assertFalse(a.engine.isConnected(b.address))
+        assertFalse(b.engine.isConnected(a.address))
+        assertTrue(a.engine.shouldReconnect(b.address))
+        assertTrue(b.engine.shouldReconnect(a.address))
+    }
+
+    @Test
+    fun `an idle link that answers its probes stays up`() {
+        val connection = pair()
+
+        settle(3 * ProtocolEngine.IDLE_PROBE_MS)
+
+        assertTrue(connection.open)
+        assertTrue(a.engine.isConnected(b.address))
+        assertEquals(listOf(DeliveryStatus.OK), a.send(b, "still here".toByteArray()).also { settle() })
+    }
+
+    @Test
+    fun `a probe takes other traffic from the peer as an answer`() {
+        network.maxFrameSize = 512
+        val old = pair()
+        // B's ACK to the ping is lost (in practice: stuck behind data it queued), but B
+        // keeps sending on the link.
+        old.dropFrom = b
+        old.dropCount = 1
+        val fresh = network.connect(b, a)
+        scheduler.advance(20)
+        val results = b.send(a, "chunk".toByteArray())
+
+        settle(ProtocolEngine.PROBE_TIMEOUT_MS + 1_000)
+
+        assertTrue(old.open)
+        assertFalse(fresh.open)
+        assertEquals(listOf(DeliveryStatus.OK), results)
+        assertTrue(a.engine.isConnected(b.address))
+    }
+
+    @Test
     fun `a restored peripheral asks the central to start over`() {
         val old = pair()
         val restarted = network.phone("B", b.address, b.peerId)

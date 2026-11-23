@@ -195,6 +195,17 @@ class ProtocolEngine(
         const val RETRY_DELAY_MS = 1_000L
         const val PROBE_TIMEOUT_MS = 3_000L
 
+        /**
+         * An established link that hasn't heard from its peer for this long gets a
+         * `/ping`; no answer drops it. A Galaxy keeps the Bluetooth connection of a
+         * peer whose app died, so otherwise the link looked alive until the peer came
+         * back as central, and kept this phone from reconnecting (9절).
+         */
+        const val IDLE_PROBE_MS = 60_000L
+
+        /** How long that `/ping` waits: nothing else waits on it, so longer than [PROBE_TIMEOUT_MS]. */
+        const val IDLE_PROBE_TIMEOUT_MS = 10_000L
+
         /** Frames at the default ATT MTU (23), before any MTU exchange. */
         const val SMALL_FRAME_SIZE = 20
 
@@ -275,6 +286,10 @@ class ProtocolEngine(
         var pairing: Pairing? = null
         var session: Session? = null
         var handshakeTimer: Cancellable? = null
+        var idleTimer: Cancellable? = null
+
+        /** When the peer last sent something authenticated on this link. */
+        var lastHeardAt = 0L
         var closed = false
 
         /** HELLOs received; a deferred decision about an older HELLO is dropped. */
@@ -541,6 +556,7 @@ class ProtocolEngine(
         host.log("Link ${link.id} to ${link.deviceId} down (${link.phase})")
         link.closed = true
         link.handshakeTimer?.cancel()
+        link.idleTimer?.cancel()
         link.pairing?.let { pairing ->
             pairing.approvalTimer?.cancel()
             // The UI is showing (or may show) its approval prompt; dismiss it.
@@ -1031,8 +1047,13 @@ class ProtocolEngine(
         }
     }
 
-    /** Sends a `/ping` on [link]; [done] gets whether its ACK came back in time. */
-    private fun probe(link: Link, done: (Boolean) -> Unit) {
+    /**
+     * Sends a `/ping` on [link]; [done] gets whether the peer answered in time. Any
+     * authenticated record from the peer counts as an answer: its ACK can wait behind
+     * data it queued earlier (a file's chunks keep Android's queue busy for seconds),
+     * and a peer whose app restarted can't seal anything with this session's key.
+     */
+    private fun probe(link: Link, timeoutMs: Long = PROBE_TIMEOUT_MS, done: (Boolean) -> Unit) {
         val msgId = store.nextMsgId()
         var finished = false
         var timer: Cancellable? = null
@@ -1044,12 +1065,39 @@ class ProtocolEngine(
                 done(alive)
             }
         }
-        timer = scheduler.schedule(PROBE_TIMEOUT_MS) { finish(false) }
+        timer = scheduler.schedule(timeoutMs) { finish(false) }
         link.probes[msgId] = { finish(true) }
         val ping = Envelope.Data(msgId, Envelope.FLAG_ACK_REQ, PING_PATH, 0, ByteArray(0))
         sendSealed(link, ping, PRIORITY_CONTROL) { written ->
             if (!written) {
                 finish(false)
+            }
+        }
+    }
+
+    /** Pings [link] once its peer has been quiet for [IDLE_PROBE_MS]; drops it if that goes unanswered. */
+    private fun armIdleProbe(link: Link, delayMs: Long = IDLE_PROBE_MS) {
+        link.idleTimer?.cancel()
+        link.idleTimer = scheduler.schedule(delayMs) {
+            link.idleTimer = null
+            if (link.closed || link.phase != Phase.ESTABLISHED) {
+                return@schedule
+            }
+            val quietFor = scheduler.now() - link.lastHeardAt
+            if (quietFor < IDLE_PROBE_MS) {
+                armIdleProbe(link, IDLE_PROBE_MS - quietFor)
+                return@schedule
+            }
+            probe(link, IDLE_PROBE_TIMEOUT_MS) { alive ->
+                if (link.closed || link.phase != Phase.ESTABLISHED) {
+                    return@probe
+                }
+                if (alive) {
+                    armIdleProbe(link)
+                } else {
+                    host.log("Link ${link.id} to ${link.deviceId} stopped answering; dropping it")
+                    dropDead(link)
+                }
             }
         }
     }
@@ -1093,6 +1141,8 @@ class ProtocolEngine(
         )
         link.phase = Phase.ESTABLISHED
         host.log("Session with ${link.deviceId} on link ${link.id} (${link.role})")
+        link.lastHeardAt = scheduler.now()
+        armIdleProbe(link)
         val hello = link.peerHello!!
         val stored = store.peers().firstOrNull { it.peerId == peerId }
         val updated = StoredPeer(
@@ -1173,6 +1223,10 @@ class ProtocolEngine(
         }
         session.decryptFailures = 0
         session.window.mark(record.counter)
+        link.lastHeardAt = scheduler.now()
+        if (link.probes.isNotEmpty()) {
+            link.probes.values.toList().forEach { it() }
+        }
         val envelope = try {
             Envelope.decode(plain)
         } catch (e: MalformedException) {

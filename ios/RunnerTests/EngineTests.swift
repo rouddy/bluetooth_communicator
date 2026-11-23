@@ -402,6 +402,51 @@ final class EngineTests: XCTestCase {
     XCTAssertEqual(results, [DeliveryStatus.ok])
   }
 
+  func testALinkWhosePeerStoppedAnsweringIsDroppedAfterAnIdleProbe() {
+    let connection = pair()
+    // B's app died; Bluetooth stays connected, so neither link goes down.
+    connection.delivers = false
+
+    settle(ProtocolEngine.idleProbeMs + ProtocolEngine.idleProbeTimeoutMs + 1_000)
+
+    XCTAssertFalse(connection.open)
+    XCTAssertFalse(a.engine.isConnected(deviceId: b.address))
+    XCTAssertFalse(b.engine.isConnected(deviceId: a.address))
+    XCTAssertTrue(a.engine.shouldReconnect(deviceId: b.address))
+    XCTAssertTrue(b.engine.shouldReconnect(deviceId: a.address))
+  }
+
+  func testAnIdleLinkThatAnswersItsProbesStaysUp() {
+    let connection = pair()
+
+    settle(3 * ProtocolEngine.idleProbeMs)
+
+    XCTAssertTrue(connection.open)
+    XCTAssertTrue(a.engine.isConnected(deviceId: b.address))
+    let results = a.send(to: b, Data("still here".utf8))
+    settle()
+    XCTAssertEqual(results.value, [DeliveryStatus.ok])
+  }
+
+  func testAProbeTakesOtherTrafficFromThePeerAsAnAnswer() {
+    network.maxFrameSize = 512
+    let old = pair()
+    // B's ACK to the ping is lost (in practice: stuck behind data it queued), but B
+    // keeps sending on the link.
+    old.dropFrom = b
+    old.dropCount = 1
+    let fresh = network.connect(b, a)
+    scheduler.advance(20)
+    let results = b.send(to: a, Data("chunk".utf8))
+
+    settle(ProtocolEngine.probeTimeoutMs + 1_000)
+
+    XCTAssertTrue(old.open)
+    XCTAssertFalse(fresh.open)
+    XCTAssertEqual(results.value, [DeliveryStatus.ok])
+    XCTAssertTrue(a.engine.isConnected(deviceId: b.address))
+  }
+
   func testARestoredPeripheralAsksTheCentralToStartOver() {
     let old = pair()
     let restarted = network.phone("B", b.address, b.peerId)

@@ -187,6 +187,11 @@ final class ProtocolEngine {
   static let maxDecryptFailures = 5
   static let retryDelayMs: Int64 = 1_000
   static let probeTimeoutMs: Int64 = 3_000
+  /// An established link that hasn't heard from its peer for this long gets a `/ping`;
+  /// no answer drops it. See Engine.kt (IDLE_PROBE_MS).
+  static let idleProbeMs: Int64 = 60_000
+  /// How long that `/ping` waits: nothing else waits on it, so longer than `probeTimeoutMs`.
+  static let idleProbeTimeoutMs: Int64 = 10_000
   /// Frames at the default ATT MTU (23), before any MTU exchange.
   static let smallFrameSize = 20
   /// How long a new link at `smallFrameSize` holds bulk records (file chunks) back,
@@ -286,6 +291,9 @@ final class ProtocolEngine {
     var pairing: Pairing?
     var session: Session?
     var handshakeTimer: Cancellable?
+    var idleTimer: Cancellable?
+    /// When the peer last sent something authenticated on this link.
+    var lastHeardAt: Int64 = 0
     var closed = false
 
     /// HELLOs received; a deferred decision about an older HELLO is dropped.
@@ -608,6 +616,7 @@ final class ProtocolEngine {
     host.log("Link \(link.id) to \(link.deviceId) down (\(link.phase.rawValue))")
     link.closed = true
     link.handshakeTimer?.cancel()
+    link.idleTimer?.cancel()
     if let pairing = link.pairing {
       pairing.approvalTimer?.cancel()
       // The UI is showing (or may show) its approval prompt; dismiss it.
@@ -1069,8 +1078,9 @@ final class ProtocolEngine {
     }
   }
 
-  /// Sends a `/ping` on `link`; `done` gets whether its ACK came back in time.
-  private func probe(_ link: Link, _ done: @escaping (Bool) -> Void) {
+  /// Sends a `/ping` on `link`; `done` gets whether the peer answered in time. Any
+  /// authenticated record from the peer counts as an answer (see Engine.kt).
+  private func probe(_ link: Link, timeoutMs: Int64 = ProtocolEngine.probeTimeoutMs, _ done: @escaping (Bool) -> Void) {
     let msgId = store.nextMsgId()
     var finished = false
     var timer: Cancellable?
@@ -1081,13 +1091,36 @@ final class ProtocolEngine {
       link.probes.removeValue(forKey: msgId)
       done(alive)
     }
-    timer = scheduler.schedule(ProtocolEngine.probeTimeoutMs) { finish(false) }
+    timer = scheduler.schedule(timeoutMs) { finish(false) }
     link.probes[msgId] = { finish(true) }
     let ping = DataEnvelope(
       msgId: msgId, flags: Envelope.flagAckReq, path: ProtocolEngine.pingPath, replyTo: 0, payload: Data())
     sendSealed(link, .data(ping), ProtocolEngine.priorityControl) { written in
       if !written {
         finish(false)
+      }
+    }
+  }
+
+  /// Pings `link` once its peer has been quiet for `idleProbeMs`; drops it if that goes unanswered.
+  private func armIdleProbe(_ link: Link, delayMs: Int64 = ProtocolEngine.idleProbeMs) {
+    link.idleTimer?.cancel()
+    link.idleTimer = scheduler.schedule(delayMs) { [unowned self] in
+      link.idleTimer = nil
+      guard !link.closed, link.phase == .established else { return }
+      let quietFor = self.scheduler.now() - link.lastHeardAt
+      if quietFor < ProtocolEngine.idleProbeMs {
+        self.armIdleProbe(link, delayMs: ProtocolEngine.idleProbeMs - quietFor)
+        return
+      }
+      self.probe(link, timeoutMs: ProtocolEngine.idleProbeTimeoutMs) { [unowned self] alive in
+        guard !link.closed, link.phase == .established else { return }
+        if alive {
+          self.armIdleProbe(link)
+        } else {
+          self.host.log("Link \(link.id) to \(link.deviceId) stopped answering; dropping it")
+          self.dropDead(link)
+        }
       }
     }
   }
@@ -1130,6 +1163,8 @@ final class ProtocolEngine {
       receiveKey: Derivation.sessionKey(key, from: peerId, to: store.localPeerId, tHello: tHello))
     link.phase = .established
     host.log("Session with \(link.deviceId) on link \(link.id) (\(link.role.rawValue))")
+    link.lastHeardAt = scheduler.now()
+    armIdleProbe(link)
     let hello = link.peerHello!
     let stored = store.peers().first { $0.peerId == peerId }
     let updated = StoredPeer(
@@ -1211,6 +1246,10 @@ final class ProtocolEngine {
     }
     session.decryptFailures = 0
     session.window.mark(counter)
+    link.lastHeardAt = scheduler.now()
+    if !link.probes.isEmpty {
+      Array(link.probes.values).forEach { $0() }
+    }
     let envelope: Envelope
     do {
       envelope = try Envelope.decode(plain)
