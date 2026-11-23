@@ -203,6 +203,8 @@ final class Network {
     /// The next `repeatCount` frames `repeatFrom` writes on this connection arrive twice.
     var repeatFrom: Phone?
     var repeatCount = 0
+    /// The frames each phone wrote, in order.
+    var frames: [(Phone, Data)] = []
 
     init(central: Phone, centralLink: Int, peripheral: Phone, peripheralLink: Int) {
       self.central = central
@@ -274,6 +276,7 @@ final class Network {
 
   func write(from: Phone, linkId: Int, frame: Data) {
     let connection = find(from, linkId)
+    connection.frames.append((from, frame))
     _ = scheduler.schedule(1) { [unowned self] in
       // Like GATT: an attribute value over 512 bytes is rejected.
       if !connection.open || frame.count > Frames.maxFrameSize {
