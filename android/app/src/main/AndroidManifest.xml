@@ -12,7 +12,7 @@
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
 
     <application
-        android:label="bluetooth_communicator"
+        android:label="Bluetooth Communicator"
         android:name="${applicationName}"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:icon="@mipmap/ic_launcher">

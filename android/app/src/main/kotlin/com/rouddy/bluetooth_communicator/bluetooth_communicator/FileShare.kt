@@ -263,6 +263,15 @@ object FileShare : FileTransferHost {
     // ------------------------------------------------------------ events
 
     override fun onTransferChanged(transfer: FileTransfer) {
+        if (transfer.state == TransferState.FAILED) {
+            // Kept for errors seen once that didn't come back (TODO 38).
+            Log.w(
+                TAG,
+                "Transfer ${transfer.id} (${if (transfer.outgoing) "send" else "receive"} ${transfer.name}) with " +
+                    "${transfer.peerId} failed: reason=${transfer.reason} status=${transfer.status} " +
+                    "after ${transfer.bytes}/${transfer.size} bytes"
+            )
+        }
         BleEventBus.emit(event(transfer))
         if (transfer.outgoing) {
             return
