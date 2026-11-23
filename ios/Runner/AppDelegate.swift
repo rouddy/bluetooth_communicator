@@ -68,6 +68,16 @@ import UIKit
         let args = call.arguments as? [String: Any]
         self.bleManager.requestClipboard(args?["deviceId"] as? String)
         result(nil)
+      case "controlMedia":
+        let args = call.arguments as? [String: Any]
+        guard let deviceId = args?["deviceId"] as? String,
+          let op = (args?["op"] as? String).flatMap(MediaMessage.op(named:))
+        else {
+          result(FlutterError(code: "BAD_ARGS", message: "deviceId and a known op are required", details: nil))
+          return
+        }
+        self.bleManager.controlMedia(deviceId, op: op)
+        result(nil)
       case "setClipboardSharing":
         let args = call.arguments as? [String: Any]
         self.bleManager.setClipboardSharing((args?["enabled"] as? Bool) ?? true)
@@ -553,7 +563,85 @@ final class IOSBleBackgroundManager: NSObject, FlutterStreamHandler, EngineHost 
       }
       return
     }
+    // iOS only sends media commands; a request gets UNSUPPORTED below.
+    if data.path == MediaMessage.path, data.isReply {
+      onMediaReply(data)
+      done(DeliveryStatus.ok)
+      return
+    }
     done(data.path.hasPrefix("/") ? DeliveryStatus.unsupported : DeliveryStatus.noReceiver)
+  }
+
+  // MARK: - Media keys (/control/media, 10절)
+
+  /// How long our command waits for the answer; also its TTL.
+  private let mediaTimeoutMs: Int64 = 10_000
+  /// Our commands waiting for their answer, by msgId.
+  private var mediaRequests: [UInt32: (deviceId: String, op: Int, timeout: DispatchWorkItem)] = [:]
+
+  /// Presses `op` on the peer at `deviceId`; answered by a `mediaControl` event.
+  func controlMedia(_ deviceId: String, op: Int) {
+    guard let peerId = peerId(forDevice: deviceId) else {
+      return emitMedia(deviceId, op, "undelivered", status: DeliveryStatus.expiredNotSent)
+    }
+    // A peer that told us what it supports and left this out (another iPhone) can't do it.
+    if let caps = engine.capsOf(peerId), !caps.builtins.contains(MediaMessage.path) {
+      return emitMedia(deviceId, op, "unsupported")
+    }
+    var msgId: UInt32 = 0
+    var failedEarly: Int?
+    msgId = engine.send(
+      peerId: peerId, path: MediaMessage.path, payload: MediaMessage.request(op), replyTo: 0, ttlMs: mediaTimeoutMs,
+      app: nil
+    ) { [weak self] status in
+      guard status != DeliveryStatus.ok else { return }
+      // A local failure can come before send returns the msgId.
+      if msgId == 0 {
+        failedEarly = status
+      } else if let self, let request = self.finishMedia(msgId) {
+        self.emitMediaFailure(request.deviceId, request.op, status)
+      }
+    }
+    if let failedEarly {
+      return emitMediaFailure(deviceId, op, failedEarly)
+    }
+    guard msgId != 0 else {
+      return emitMedia(deviceId, op, "undelivered", status: DeliveryStatus.malformed)
+    }
+    let id = msgId
+    let timeout = DispatchWorkItem { [weak self] in
+      guard let self, let request = self.finishMedia(id) else { return }
+      self.emitMedia(request.deviceId, request.op, "timeout")
+    }
+    mediaRequests[id] = (deviceId: deviceId, op: op, timeout: timeout)
+    DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(Int(mediaTimeoutMs)), execute: timeout)
+  }
+
+  private func onMediaReply(_ data: DataEnvelope) {
+    guard let reply = MediaMessage.decodeReply(data.payload), let request = finishMedia(data.replyTo) else { return }
+    emitMedia(
+      request.deviceId, request.op, MediaMessage.resultName(reply.result), state: MediaMessage.stateName(reply.state))
+  }
+
+  private func finishMedia(_ msgId: UInt32) -> (deviceId: String, op: Int)? {
+    guard let request = mediaRequests.removeValue(forKey: msgId) else { return nil }
+    request.timeout.cancel()
+    return (request.deviceId, request.op)
+  }
+
+  private func emitMediaFailure(_ deviceId: String, _ op: Int, _ status: Int) {
+    if status == DeliveryStatus.unsupported {
+      emitMedia(deviceId, op, "unsupported")
+    } else {
+      emitMedia(deviceId, op, "undelivered", status: status)
+    }
+  }
+
+  private func emitMedia(_ deviceId: String, _ op: Int, _ result: String, state: String? = nil, status: Int? = nil) {
+    var payload: [String: Any] = ["deviceId": deviceId, "op": MediaMessage.opName(op), "result": result]
+    payload["state"] = state
+    payload["status"] = status
+    emit(type: "mediaControl", payload: payload)
   }
 
   // MARK: - Clipboard (/clipboard, 10절)

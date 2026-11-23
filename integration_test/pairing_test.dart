@@ -19,6 +19,8 @@
 //   how long it took; the peer's user approves it.
 // - MODE=receiveFile: approve the next file the peer sends, wait until it's received,
 //   print how long that took, and close the export screen.
+// - MODE=media: on the peer's page, ask whether it's playing, press play/pause twice,
+//   and print the state after each answer (the peer is an Android phone with a player).
 // CENTRAL=false turns scanning off on this phone, so the peer connects to it as
 // central (this phone is the peripheral; the default lets either side connect).
 // CLIP_TEXT puts that text into this phone's clipboard first, for the peer to take.
@@ -117,6 +119,31 @@ void main() {
       expect(File(transfer.path!).lengthSync(), transfer.size);
       await tester.tap(find.text('닫기'));
       await tester.pumpAndSettle();
+      return stayLive(tester);
+    }
+    if (_mode == 'media') {
+      await pumpUntilFound(tester, peer);
+      await tester.tap(peer.first);
+      await tester.pumpAndSettle();
+      await pumpUntilFound(tester, find.text('상대 기기의 음악·동영상 재생을 조작합니다'), timeout: const Duration(seconds: 60));
+      final page = tester.widget<app.DeviceControlPage>(find.byType(app.DeviceControlPage));
+      final controller = page.controller;
+      final id = page.device.identifier;
+      Future<app.MediaPlayback> press(String tooltip) async {
+        final started = DateTime.now();
+        await tester.tap(find.byTooltip(tooltip));
+        await tester.pump();
+        await pumpUntilGone(tester, find.text('보내는 중…'), timeout: const Duration(seconds: 15));
+        final playback = controller.mediaStates[id]!.playback;
+        debugPrint('[media] $tooltip -> $playback in ${DateTime.now().difference(started).inMilliseconds} ms');
+        return playback;
+      }
+
+      final before = await press('상태 새로고침');
+      final toggle = before == app.MediaPlayback.playing ? '일시정지' : '재생';
+      final after = await press(toggle);
+      expect(after, isNot(before), reason: 'pressing $toggle should change the state');
+      await press(after == app.MediaPlayback.playing ? '일시정지' : '재생');
       return stayLive(tester);
     }
     if (_mode == 'remove') {

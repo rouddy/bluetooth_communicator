@@ -1,6 +1,6 @@
 # BLE 메시지 프로토콜 v1
 
-> 상태: **Android와 iOS에 구현했습니다**(14절의 1–5단계, Android는 7단계도). 내장 기능 `/clipboard`와 `/file`(10절)도 두 플랫폼에 있습니다. 6단계(`/control/media`)는 아직입니다. 관련 TODO: 23번.
+> 상태: **Android와 iOS에 구현했습니다**(14절의 1–6단계, Android는 7단계도). 내장 기능 `/clipboard`, `/file`, `/control/media`(10절)도 있습니다. `/control/media`는 Android만 조작당하고, iOS는 조작하는 쪽만 합니다. 관련 TODO: 23번.
 > 구현하면서 기기에서 확인한 내용을 반영해 원래 설계에서 바뀐 곳이 있습니다. 4절(조각 최대 512바이트), 9절(연결된 링크가 살아 있는지 확인), 10절(`/ping`), 12절(확정된 채널 계약)입니다.
 
 ## 1. 목표와 범위
@@ -290,7 +290,7 @@ ACK는 "도착했다"는 뜻입니다. 실행 결과는 따로 `REPLY` DATA로 �
 ## 8. Path와 라우팅
 
 - path는 UTF-8로 255바이트 이하입니다.
-- `/`로 시작하는 path는 이 앱의 내장 기능입니다. 지금 정의된 것은 `/ping`, `/clipboard`, `/file`, `/control/media`(아직 구현 안 함)입니다.
+- `/`로 시작하는 path는 이 앱의 내장 기능입니다. 지금 정의된 것은 `/ping`, `/clipboard`, `/file`, `/control/media`입니다.
 - 그 밖의 path는 `<packageName>/<임의 문자열>`입니다. 첫 `/` 앞이 패키지명입니다.
 - **앱 식별자**는 (패키지명, 서명 인증서 SHA-256)입니다. 패키지명만으로 판단하면, 서명이 다른 같은 이름의 앱을 사이드로드해서 데이터를 받을 수 있습니다.
 
@@ -442,7 +442,8 @@ B → A  ACK   ref=#41 OK
 B → A  DATA  #7   /control/media  REPLY(#41)  [00 01]  성공, 재생 중
 ```
 
-- Android: `AudioManager.dispatchMediaKeyEvent`로 키를 보냅니다(DOWN, UP). 지금 활성인 미디어 세션이 받고, 별도 권한은 필요 없습니다. 상태는 `isMusicActive()`로 읽습니다. 키를 보낸 직후에는 상태가 아직 바뀌지 않았을 수 있습니다(15절).
+- Android: `AudioManager.dispatchMediaKeyEvent`로 키를 보냅니다(DOWN, UP). 지금 활성인 미디어 세션이 받고, 별도 권한은 필요 없습니다. 상태는 `isMusicActive()`로 읽습니다. 키를 보낸 직후에는 상태가 아직 바뀌지 않았을 수 있어서, 600 ms 기다렸다가 답합니다(15절). 활성 세션이 없으면 키가 아무것도 바꾸지 못할 수 있고, 그때 답은 OK와 "재생 중 아님"입니다.
+- 보내는 쪽은 상대의 CAPS에 이 path가 없으면 보내지 않습니다(iPhone, 이전 버전 앱). 답을 10초(TTL) 기다립니다.
 - iOS: 다른 앱의 재생을 제어할 수 없어서 CAPS에 넣지 않습니다. 조작하는 쪽 역할만 합니다.
 - 허용 범위: peer 승인(6.3)을 받은 상대만 조작할 수 있습니다.
 
@@ -496,7 +497,7 @@ parcelable PeerInfo { String peerId; String name; boolean connected; }
 - 새 메서드: `respondPairing{deviceId, accept}`, `removeDevice{deviceId}`(지금의 `disconnectDevice`를 대신하고, UNPAIR를 보내고 K를 지움)
 - `setDeviceName{name}`(iOS): 기본값은 `UIDevice.current.name`("iPhone")
 - 파일 전송(10절의 `/file`): 메서드 `sendFile`, `respondFile`, `cancelFile`, `dismissFile`, `exportFile`, 이벤트 `fileTransfer`
-- 아직 없음: 미디어 조작 메서드
+- 미디어 조작(10절의 `/control/media`): 메서드 `controlMedia{deviceId, op}`(op는 `getState`, `play`, `pause`, `playPause`, `stop`, `next`, `previous`), 이벤트 `mediaControl{deviceId, op, result, state?, status?}`
 
 ## 13. 보안 범위
 
@@ -525,7 +526,7 @@ parcelable PeerInfo { String peerId; String name; boolean connected; }
 3. ✅ (Android) **앱 페어링 + AUTH**: PAIR_REQUEST, 승인 화면, 확인 코드, 키 저장(Keystore), REJECT 처리
 4. ✅ (Android) **SEALED**
 5. ✅ (Android) **ACK, 중복 제거, 재전송, TTL, 흐름 제어**
-6. **CAPS** ✅ + `/control/media` (Android): 첫 실제 명령. CAPS만 구현했습니다.
+6. ✅ **CAPS** + `/control/media`: Android는 조작당하는 쪽과 조작하는 쪽, iOS는 조작하는 쪽만 합니다.
 7. ✅ (Android) **AIDL 서비스**와 테스트 앱(`test_app/`)
 
 2–5단계는 따로 나누지 않고 함께 구현했습니다. 상태 기계(`ProtocolEngine`)는 BLE와 분리돼 있어서, 두 엔진을 메모리 안의 네트워크로 이은 JVM 테스트로 대부분의 흐름을 기기 없이 확인합니다.
@@ -534,7 +535,7 @@ parcelable PeerInfo { String peerId; String name; boolean connected; }
 
 ## 15. 미정 / 구현하면서 확인할 것
 
-- 미디어 키를 보낸 뒤 `isMusicActive()`에 반영되기까지 걸리는 시간
+- ~~미디어 키를 보낸 뒤 `isMusicActive()`에 반영되기까지 걸리는 시간~~ Fold5의 VLC에서는 600 ms 뒤에 읽으면 바뀐 상태가 나왔습니다. 그래서 키를 누른 뒤 600 ms 기다렸다가 답합니다(GET_STATE는 바로 답함)
 - ~~iOS에서 같은 기기가 central일 때와 peripheral일 때 identifier가 같은지~~ 같습니다(S23을 `CBPeripheral`로 볼 때와 `CBCentral`로 볼 때 같은 UUID). 그래서 iOS에서도 deviceId로 두 번째 연결을 미리 막을 수 있습니다(9절). 아직 하지 않았고, peerId로 정합니다
 - iOS 승인 화면: 지금은 포그라운드일 때만 가능합니다. 알림 흐름이 생기면 백그라운드에서도 받을 수 있습니다
 - 서명 키 교체(APK Signature Scheme v3 rotation): v1은 현재 서명자만 비교합니다. 한쪽만 업데이트되면 두 폰의 해시가 달라져 `DENIED`가 됩니다

@@ -22,6 +22,7 @@ import com.rouddy.bluetooth_communicator.bluetooth_communicator.protocol.EngineE
 import com.rouddy.bluetooth_communicator.bluetooth_communicator.protocol.EngineHost
 import com.rouddy.bluetooth_communicator.bluetooth_communicator.protocol.Envelope
 import com.rouddy.bluetooth_communicator.bluetooth_communicator.protocol.FileMessage
+import com.rouddy.bluetooth_communicator.bluetooth_communicator.protocol.MediaMessage
 import com.rouddy.bluetooth_communicator.bluetooth_communicator.protocol.LocalIdentity
 import com.rouddy.bluetooth_communicator.bluetooth_communicator.protocol.PeerId
 import com.rouddy.bluetooth_communicator.bluetooth_communicator.protocol.PeerState
@@ -104,6 +105,7 @@ object BleRuntime : EngineHost {
         registry = AppRegistry(this.context)
         router = registry
         ClipboardShare.init(this.context)
+        MediaControl.init(this.context)
         FileShare.init(this.context, engine, scheduler)
         this.context.getSystemService(NotificationManager::class.java).createNotificationChannel(
             NotificationChannel(PAIRING_CHANNEL_ID, "기기 연결 요청", NotificationManager.IMPORTANCE_HIGH)
@@ -161,7 +163,10 @@ object BleRuntime : EngineHost {
     }
 
     override fun localCaps(): Capabilities =
-        Capabilities(listOf(ClipboardMessage.PATH, FileMessage.PATH), router?.localCaps()?.apps ?: emptyList())
+        Capabilities(
+            listOf(ClipboardMessage.PATH, FileMessage.PATH, MediaMessage.PATH),
+            router?.localCaps()?.apps ?: emptyList()
+        )
 
     override fun deliver(peerId: PeerId, data: Envelope.Data, done: (Int) -> Unit) {
         val target = router
@@ -176,7 +181,11 @@ object BleRuntime : EngineHost {
                 done(DeliveryStatus.OK)
             }
             data.path == FileMessage.PATH -> FileShare.transfers.onRequest(peerId, data, done)
-            // No other built-in paths yet (/control/media is a later step).
+            data.path == MediaMessage.PATH && data.isReply -> {
+                MediaControl.onReply(data)
+                done(DeliveryStatus.OK)
+            }
+            data.path == MediaMessage.PATH -> MediaControl.onRequest(peerId, data, done)
             data.path.startsWith("/") -> done(DeliveryStatus.UNSUPPORTED)
             target == null -> done(DeliveryStatus.NO_RECEIVER)
             else -> target.deliver(peerId, data, done)

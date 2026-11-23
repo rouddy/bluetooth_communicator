@@ -91,8 +91,12 @@ final class VectorsTests: XCTestCase {
     let envelopes = vectors["envelopes"]
     let app = AppIdentity(packageName: "com.example.app", certHash: String(repeating: "ab", count: 32))
     let cases: [(String, Envelope)] = [
-      ("dataRequest", .data(DataEnvelope(msgId: 41, flags: Envelope.flagAckReq, path: "/control/media", replyTo: 0, payload: Data([1])))),
-      ("dataReply", .data(DataEnvelope(msgId: 7, flags: Envelope.flagReply, path: "/control/media", replyTo: 41, payload: Data([0, 1])))),
+      ("dataRequest", .data(DataEnvelope(
+        msgId: 41, flags: Envelope.flagAckReq, path: MediaMessage.path, replyTo: 0,
+        payload: MediaMessage.request(MediaMessage.opPlay)))),
+      ("dataReply", .data(DataEnvelope(
+        msgId: 7, flags: Envelope.flagReply, path: MediaMessage.path, replyTo: 41,
+        payload: MediaMessage.reply(result: MediaMessage.ok, state: MediaMessage.statePlaying)))),
       ("ack", .ack(refMsgId: 41, status: DeliveryStatus.noReceiver)),
       ("caps", .caps(msgId: 9, builtins: ["/control/media"], apps: [app])),
       ("unpair", .unpair(msgId: 10)),

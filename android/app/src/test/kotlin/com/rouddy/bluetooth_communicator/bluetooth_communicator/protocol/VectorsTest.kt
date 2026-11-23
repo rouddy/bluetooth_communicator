@@ -94,8 +94,12 @@ class VectorsTest {
         val envelopes = vectors.getJSONObject("envelopes")
         val app = AppIdentity("com.example.app", "ab".repeat(32))
         mapOf(
-            "dataRequest" to Envelope.Data(41, Envelope.FLAG_ACK_REQ, "/control/media", 0, byteArrayOf(1)),
-            "dataReply" to Envelope.Data(7, Envelope.FLAG_REPLY, "/control/media", 41, byteArrayOf(0, 1)),
+            "dataRequest" to Envelope.Data(
+                41, Envelope.FLAG_ACK_REQ, MediaMessage.PATH, 0, MediaMessage.request(MediaMessage.OP_PLAY)
+            ),
+            "dataReply" to Envelope.Data(
+                7, Envelope.FLAG_REPLY, MediaMessage.PATH, 41, MediaMessage.reply(MediaMessage.OK, MediaMessage.STATE_PLAYING)
+            ),
             "ack" to Envelope.Ack(41, DeliveryStatus.NO_RECEIVER),
             "caps" to Envelope.Caps(9, listOf("/control/media"), listOf(app)),
             "unpair" to Envelope.Unpair(10),

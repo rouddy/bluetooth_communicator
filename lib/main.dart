@@ -825,6 +825,68 @@ class DeviceControlPage extends StatelessWidget {
     );
   }
 
+  /// Presses media keys on the peer (docs/protocol.md 10절, `/control/media`).
+  Widget _mediaTile(bool isConnected) {
+    final media = controller.mediaStates[device.identifier];
+    final pending = media?.pending;
+    final playback = media?.playback ?? MediaPlayback.unknown;
+    final enabled = isConnected && pending == null;
+    void press(MediaOp op) => controller.controlMedia(device.identifier, op);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        ListTile(
+          leading: const Icon(Icons.music_note),
+          title: const Text('미디어 조작'),
+          subtitle: Text(switch (playback) {
+            _ when !isConnected => '연결되면 쓸 수 있습니다',
+            _ when pending != null => '보내는 중…',
+            MediaPlayback.playing => '상대 기기에서 재생 중',
+            MediaPlayback.notPlaying => '상대 기기에서 재생 중이 아님',
+            MediaPlayback.unknown => '상대 기기의 음악·동영상 재생을 조작합니다',
+          }),
+          enabled: isConnected,
+        ),
+        Padding(
+          padding: const EdgeInsets.only(left: 56, bottom: 8),
+          child: Row(
+            children: [
+              IconButton(
+                tooltip: '이전 곡',
+                icon: const Icon(Icons.skip_previous),
+                onPressed: enabled ? () => press(MediaOp.previous) : null,
+              ),
+              if (playback == MediaPlayback.playing)
+                IconButton(
+                  tooltip: '일시정지',
+                  icon: const Icon(Icons.pause),
+                  onPressed: enabled ? () => press(MediaOp.pause) : null,
+                )
+              else
+                IconButton(
+                  tooltip: playback == MediaPlayback.notPlaying ? '재생' : '재생/일시정지',
+                  icon: const Icon(Icons.play_arrow),
+                  onPressed: enabled
+                      ? () => press(playback == MediaPlayback.notPlaying ? MediaOp.play : MediaOp.playPause)
+                      : null,
+                ),
+              IconButton(
+                tooltip: '다음 곡',
+                icon: const Icon(Icons.skip_next),
+                onPressed: enabled ? () => press(MediaOp.next) : null,
+              ),
+              IconButton(
+                tooltip: '상태 새로고침',
+                icon: const Icon(Icons.refresh),
+                onPressed: enabled ? () => press(MediaOp.getState) : null,
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
   /// Sends a file the user picks (docs/protocol.md 10절, `/file`).
   Widget _sendFileTile(bool isConnected) {
     return ListTile(
@@ -861,7 +923,8 @@ class DeviceControlPage extends StatelessWidget {
 
   Widget _buildPage(BuildContext context) {
     final isConnected = controller.connectedDeviceIds.contains(device.identifier);
-    final peerId = controller.peerFor(device.identifier)?.peerId;
+    final peer = controller.peerFor(device.identifier);
+    final peerId = peer?.peerId;
     return Scaffold(
       appBar: AppBar(
         title: Text(device.name.isEmpty ? device.identifier : device.name),
@@ -886,6 +949,7 @@ class DeviceControlPage extends StatelessWidget {
           ),
           if (peerId != null || isConnected) _clipboardTile(isConnected),
           if (peerId != null || isConnected) _sendFileTile(isConnected),
+          if ((peerId != null || isConnected) && !(peer?.isIos ?? false)) _mediaTile(isConnected),
           ...controller.outgoingTransfersTo(device.identifier).map(_outgoingTile),
           if (peerId != null)
             ListTile(
@@ -951,6 +1015,9 @@ class BleAppController extends ChangeNotifier {
 
   /// Our clipboard requests in progress, by device.
   final Map<String, ClipboardRequestState> clipboardRequests = <String, ClipboardRequestState>{};
+
+  /// The media controls of each peer we pressed keys on (`/control/media`).
+  final Map<String, MediaControlState> mediaStates = <String, MediaControlState>{};
 
   /// File transfers by id: ours until they end, and the peers' until the dialog
   /// is closed (a received file stays for the export screen until dismissed).
@@ -1239,6 +1306,47 @@ class BleAppController extends ChangeNotifier {
     _ when status == 1 || status == 2 => '$name의 앱이 클립보드 가져오기를 지원하지 않습니다. 앱을 업데이트해 주세요.',
     _ when status == 1000 => '$name와(과) 연결되어 있지 않습니다.',
     _ => '$name의 클립보드를 가져오지 못했습니다.',
+  };
+
+  /// Presses [op] on [deviceId]'s active media player, or asks whether it's playing
+  /// (`mediaControl` events). One command at a time per peer.
+  Future<void> controlMedia(String deviceId, MediaOp op) async {
+    final media = mediaStates.putIfAbsent(deviceId, MediaControlState.new);
+    if (media.pending != null) {
+      return;
+    }
+    media.pending = op;
+    notifyListeners();
+    if (!await _invoke('controlMedia', {'deviceId': deviceId, 'op': op.name})) {
+      media.pending = null;
+      notifyListeners();
+    }
+  }
+
+  void _onMediaControl(String deviceId, Map<String, dynamic> event) {
+    final media = mediaStates.putIfAbsent(deviceId, MediaControlState.new)..pending = null;
+    final result = event['result'] as String? ?? 'failed';
+    final name = _displayName(deviceId);
+    if (result == 'ok') {
+      media.playback = MediaPlayback.values.asNameMap()[event['state']] ?? MediaPlayback.unknown;
+    } else {
+      final isIos = peerFor(deviceId)?.isIos ?? false;
+      _reportError(_mediaFailure(name, result, event['status'] as int?, isIos: isIos));
+    }
+    notifyListeners();
+  }
+
+  static String _mediaFailure(String name, String result, int? status, {required bool isIos}) => switch (result) {
+    'failed' => '$name에서 미디어 키를 누르지 못했습니다.',
+    'unsupportedOp' => '$name의 앱이 이 미디어 명령을 지원하지 않습니다.',
+    'unsupported' when isIos => '$name은(는) 미디어 조작을 지원하지 않습니다. iPhone은 다른 앱의 재생을 조작할 수 없습니다.',
+    // An Android peer whose CAPS leave the path out runs an older version.
+    'unsupported' => '$name의 앱이 미디어 조작을 지원하지 않습니다. 앱을 업데이트해 주세요.',
+    'timeout' => '$name에서 응답이 없습니다.',
+    // NO_RECEIVER/UNSUPPORTED from an app version without /control/media.
+    _ when status == 1 || status == 2 => '$name의 앱이 미디어 조작을 지원하지 않습니다. 앱을 업데이트해 주세요.',
+    _ when status == 1000 => '$name와(과) 연결되어 있지 않습니다.',
+    _ => '$name에 미디어 명령을 보내지 못했습니다.',
   };
 
   /// Lets the user pick a file and offers it to [deviceId]; its user has to
@@ -1739,6 +1847,11 @@ class BleAppController extends ChangeNotifier {
           _onFileTransfer(FileTransfer.fromEvent(event));
         }
         break;
+      case 'mediaControl':
+        if (event['deviceId'] case final String id) {
+          _onMediaControl(id, event);
+        }
+        break;
       case 'clipboardShared':
         if (event['deviceId'] case final String id) {
           _notices.add('${_displayName(id)}에 클립보드를 보냈습니다.');
@@ -1799,10 +1912,17 @@ class BleDevice {
     required this.name,
     this.peerId,
     this.state,
+    this.platform,
   });
 
   final String identifier;
   final String name;
+
+  /// What the peer announced in HELLO: 1 Android, 2 iOS (docs/protocol.md 6.2).
+  final int? platform;
+
+  /// iOS can't press media keys for other apps, so an iPhone peer can't be controlled.
+  bool get isIos => platform == 2;
 
   /// The peer's install id, for app-paired peers (docs/protocol.md 2절).
   final String? peerId;
@@ -1816,6 +1936,7 @@ class BleDevice {
       name: (map['name'] ?? '').toString(),
       peerId: map['peerId'] as String?,
       state: PeerState.values.asNameMap()[map['state']],
+      platform: map['platform'] as int?,
     );
   }
 }
@@ -2030,6 +2151,20 @@ String formatBytes(int bytes) {
     unit++;
   }
   return '${value.toStringAsFixed(1)} ${units[unit]}';
+}
+
+/// A `/control/media` command (docs/protocol.md 10절); the names are the channel's.
+enum MediaOp { getState, play, pause, playPause, stop, next, previous }
+
+/// Whether the peer is playing, as of its last answer.
+enum MediaPlayback { unknown, playing, notPlaying }
+
+/// The media controls' state for one peer.
+class MediaControlState {
+  MediaPlayback playback = MediaPlayback.unknown;
+
+  /// The command waiting for its answer, if any.
+  MediaOp? pending;
 }
 
 enum ClipboardRequestState {
