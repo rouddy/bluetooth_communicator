@@ -200,6 +200,9 @@ final class Network {
     /// The next `dropCount` frames `dropFrom` writes on this connection vanish.
     var dropFrom: Phone?
     var dropCount = 0
+    /// The next `repeatCount` frames `repeatFrom` writes on this connection arrive twice.
+    var repeatFrom: Phone?
+    var repeatCount = 0
 
     init(central: Phone, centralLink: Int, peripheral: Phone, peripheralLink: Int) {
       self.central = central
@@ -232,9 +235,12 @@ final class Network {
   }
 
   @discardableResult
-  func connect(_ central: Phone, _ peripheral: Phone, userInitiated: Bool = false) -> Connection {
+  func connect(
+    _ central: Phone, _ peripheral: Phone, userInitiated: Bool = false, prepare: (Connection) -> Void = { _ in }
+  ) -> Connection {
     let connection = Connection(central: central, centralLink: nextLinkId, peripheral: peripheral, peripheralLink: nextLinkId + 1)
     nextLinkId += 2
+    prepare(connection)
     connections.append(connection)
     peripheral.engine.linkUp(
       linkId: connection.peripheralLink, role: .peripheral, deviceId: central.address, maxFrameSize: maxFrameSize, userInitiated: false)
@@ -282,10 +288,17 @@ final class Network {
       if !connection.delivers || self.lose(from, frame) {
         return
       }
-      if from === connection.central {
-        connection.peripheral.engine.frameReceived(linkId: connection.peripheralLink, frame: frame)
-      } else {
-        connection.central.engine.frameReceived(linkId: connection.centralLink, frame: frame)
+      var times = 1
+      if connection.repeatFrom === from && connection.repeatCount > 0 {
+        connection.repeatCount -= 1
+        times = 2
+      }
+      for _ in 0..<times {
+        if from === connection.central {
+          connection.peripheral.engine.frameReceived(linkId: connection.peripheralLink, frame: frame)
+        } else {
+          connection.central.engine.frameReceived(linkId: connection.centralLink, frame: frame)
+        }
       }
     }
   }

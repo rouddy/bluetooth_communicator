@@ -669,6 +669,16 @@ class ProtocolEngine(
             host.log("Ignored a HELLO with this phone's own peerId")
             return
         }
+        val previous = link.peerHello
+        if (link.role == Role.PERIPHERAL && previous != null && previous.nonce.contentEquals(hello.nonce) &&
+            (link.phase == Phase.AWAIT_HELLO || link.phase == Phase.AWAIT_AUTH)
+        ) {
+            // The HELLO_c we're answering, delivered twice (a central sends each with a
+            // new nonce). Answering it again with a new nonce would make the AUTH the
+            // central computes from our first answer fail as BAD_MAC (seen with an iPhone).
+            host.log("Ignored a repeated HELLO on link ${link.id}")
+            return
+        }
         link.helloCount++
         host.log("HELLO from ${link.deviceId} (${hello.peerId}, ${hello.name}) on link ${link.id} in ${link.phase}")
         when (link.role) {

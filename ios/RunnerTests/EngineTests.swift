@@ -447,6 +447,26 @@ final class EngineTests: XCTestCase {
     XCTAssertTrue(a.engine.isConnected(deviceId: b.address))
   }
 
+  func testAHelloDeliveredTwiceIsAnsweredOnce() {
+    network.maxFrameSize = 512
+    pair().drop()
+    a.events = []
+    b.events = []
+
+    // A's HELLO_c reaches B twice.
+    let connection = network.connect(a, b) {
+      $0.repeatFrom = self.a
+      $0.repeatCount = 1
+    }
+    settle()
+
+    XCTAssertTrue(connection.open)
+    XCTAssertTrue(a.engine.isConnected(deviceId: b.address))
+    XCTAssertTrue(b.engine.isConnected(deviceId: a.address))
+    XCTAssertEqual(a.store.peers().first?.state, .paired)
+    XCTAssertEqual(b.store.peers().first?.state, .paired)
+  }
+
   func testARestoredPeripheralAsksTheCentralToStartOver() {
     let old = pair()
     let restarted = network.phone("B", b.address, b.peerId)

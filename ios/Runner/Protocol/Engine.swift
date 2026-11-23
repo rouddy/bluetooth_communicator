@@ -726,6 +726,15 @@ final class ProtocolEngine {
       host.log("Ignored a HELLO with this phone's own peerId")
       return
     }
+    if link.role == .peripheral, let previous = link.peerHello, previous.nonce == hello.nonce,
+      link.phase == .awaitHello || link.phase == .awaitAuth
+    {
+      // The HELLO_c we're answering, delivered twice (a central sends each with a new
+      // nonce). Answering it again with a new nonce would make the AUTH the central
+      // computes from our first answer fail as BAD_MAC (seen with an iPhone).
+      host.log("Ignored a repeated HELLO on link \(link.id)")
+      return
+    }
     link.helloCount += 1
     host.log("HELLO from \(link.deviceId) (\(hello.peerId), \(hello.name ?? "")) on link \(link.id) in \(link.phase.rawValue)")
     switch link.role {

@@ -653,6 +653,27 @@ class EngineTest {
     }
 
     @Test
+    fun `a HELLO delivered twice is answered once`() {
+        network.maxFrameSize = 512
+        pair().drop()
+        a.events.clear()
+        b.events.clear()
+
+        // A's HELLO_c reaches B twice.
+        val connection = network.connect(a, b) {
+            it.repeatFrom = a
+            it.repeatCount = 1
+        }
+        settle()
+
+        assertTrue(connection.open)
+        assertTrue(a.engine.isConnected(b.address))
+        assertTrue(b.engine.isConnected(a.address))
+        assertEquals(PeerState.PAIRED, a.store.peers().single().state)
+        assertEquals(PeerState.PAIRED, b.store.peers().single().state)
+    }
+
+    @Test
     fun `a restored peripheral asks the central to start over`() {
         val old = pair()
         val restarted = network.phone("B", b.address, b.peerId)

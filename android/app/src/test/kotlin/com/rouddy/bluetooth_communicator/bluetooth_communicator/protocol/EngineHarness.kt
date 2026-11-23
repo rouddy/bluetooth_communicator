@@ -166,6 +166,10 @@ class Network(private val scheduler: FakeScheduler) {
         var dropFrom: Phone? = null
         var dropCount = 0
 
+        /** The next [repeatCount] frames [repeatFrom] writes on this connection arrive twice. */
+        var repeatFrom: Phone? = null
+        var repeatCount = 0
+
         fun drop() {
             if (!open) {
                 return
@@ -185,8 +189,14 @@ class Network(private val scheduler: FakeScheduler) {
 
     fun phone(name: String, address: String, peerId: PeerId) = Phone(name, address, peerId, scheduler, this)
 
-    fun connect(central: Phone, peripheral: Phone, userInitiated: Boolean = false): Connection {
+    fun connect(
+        central: Phone,
+        peripheral: Phone,
+        userInitiated: Boolean = false,
+        prepare: (Connection) -> Unit = {}
+    ): Connection {
         val connection = Connection(central, nextLinkId++, peripheral, nextLinkId++)
+        prepare(connection)
         connections += connection
         // The peripheral sees the subscription before the central's CCCD write completes.
         peripheral.engine.linkUp(connection.peripheralLink, Role.PERIPHERAL, central.address, maxFrameSize, false)
@@ -228,10 +238,18 @@ class Network(private val scheduler: FakeScheduler) {
             if (!connection.delivers || lose(from, frame)) {
                 return@schedule
             }
-            if (from === connection.central) {
-                connection.peripheral.engine.frameReceived(connection.peripheralLink, frame)
+            val times = if (connection.repeatFrom === from && connection.repeatCount > 0) {
+                connection.repeatCount--
+                2
             } else {
-                connection.central.engine.frameReceived(connection.centralLink, frame)
+                1
+            }
+            repeat(times) {
+                if (from === connection.central) {
+                    connection.peripheral.engine.frameReceived(connection.peripheralLink, frame)
+                } else {
+                    connection.central.engine.frameReceived(connection.centralLink, frame)
+                }
             }
         }
     }
