@@ -240,7 +240,12 @@
 - 틀린 것으로 확인한 가설
   - "iPhone이 client 링크를 닫으면(`cancelPeripheralConnection`) 공유 연결이 끊긴다": 연결을 닫지 않고 남겨 둬도(Android `idleClients`처럼) 똑같이 30초 뒤에 끊겼습니다. 닫았을 때도 끊긴 시각은 닫은 시각이 아니라 write로부터 30초였습니다.
   - "MTU가 커진 뒤 처음 보내는 큰 write가 버려진다": 크기를 키우는 코드가 없던 2026-11-22에도 20바이트 write가 똑같이 막혔습니다.
-- 다음 단계: Fold5의 개발자 옵션에서 "Bluetooth HCI 스누프 로그"를 켜고 재현해, 막힌 write가 무선으로 나갔는지(iPhone 쪽)와 Fold5 컨트롤러가 받았는지 봐야 합니다. adb로는 켤 수 없습니다(`persist.bluetooth.btsnooplogmode` 설정 거부).
+- 전송 없이 같은 재연결을 하면 iPhone의 `/ping`이 0.12초 만에 돌아오고 끊김도 없었습니다(2026-11-23). 전송 부하가 있을 때만 생깁니다. ping이 2.2초 만에 돌아와 iPhone-central 링크가 남은 때에도, 그 뒤의 다른 write가 막혀 30초 뒤 끊겼습니다.
+- HCI 로그는 Fold5에서 얻지 못했습니다. 개발자 옵션의 "블루투스 HCI 스누프 로그 사용"과 "snoop log socket"을 켜면 `persist.bluetooth.btsnooplogmode=full`, `btsnoopsocket.enabled=true`가 되지만:
+  - 파일은 `/data/misc/bluetooth/logs`에 쌓이는데 adb로 읽을 수 없고, `adb bugreport`와 SysDump(`*#9900#` → Copy to sdcard, `/data/log`만 복사하며 `/data/log/bt`는 비어 있음)에도 들어가지 않습니다.
+  - 소켓(localhost:8872)은 Bluetooth를 여러 번 다시 켜도 열리지 않았습니다(`/proc/net/tcp`에 없음). 사용자 빌드라서인 것으로 보입니다.
+  - `dumpsys bluetooth_manager`의 `BTSNOOP_LOG_SUMMARY`는 최근 2분의 이벤트만 담고 ACL이 없으며, `PickENH`/`QCENH`는 Qualcomm 컨트롤러 진단 로그(ACL handle 0xEDC)입니다.
+- 다음 단계: iPhone 쪽에서 잡습니다. Apple 개발자 사이트의 Bluetooth 로깅 프로파일을 iPhone에 설치하고, Xcode Additional Tools의 PacketLogger로 연결된 iPhone의 HCI를 실시간으로 받으면서 재현하면, 막힌 write가 iPhone에서 나갔는지와 그 직전의 LL 절차(Data Length 변경 등)를 볼 수 있습니다. 다른 방법은 스누프 파일을 읽을 수 있는 Android 기기(userdebug 빌드 등)로 재현하는 것입니다.
 
 ### 35. 재연결 직후 링크가 20바이트 프레임으로 맺어짐 `확인됨` ✅ 해결
 - 해결(2026-11-23): 링크를 올린 뒤에 MTU가 커지면 프레임도 키웁니다.
