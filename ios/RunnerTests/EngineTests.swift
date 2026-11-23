@@ -358,6 +358,50 @@ final class EngineTests: XCTestCase {
     XCTAssertEqual(b.pairingRequests.count, 1)
   }
 
+  func testANewLinkAtTheDefaultMtuHoldsBulkRecordsUntilItsFramesGrow() {
+    pair().drop()
+    var framesFromA = 0
+    network.lose = { [unowned self] from, _ in
+      if from === self.a { framesFromA += 1 }
+      return false
+    }
+    let connection = network.connect(a, b)
+    settle(500)
+    let sentBefore = framesFromA
+    var results: [Int] = []
+    _ = a.engine.send(
+      peerId: b.peerId, path: "\(testApp.packageName)/chat", payload: Data(count: 2_000), replyTo: 0, ttlMs: 0, app: testApp,
+      bulk: true
+    ) { results.append($0) }
+    settle(1_000)
+    XCTAssertTrue(b.delivered.isEmpty)
+
+    // The MTU exchange finishes: the record goes out in large frames.
+    a.engine.setMaxFrameSize(linkId: connection.centralLink, maxFrameSize: 512)
+    settle(500)
+
+    XCTAssertEqual(results, [DeliveryStatus.ok])
+    XCTAssertEqual(b.delivered.count, 1)
+    XCTAssertLessThan(framesFromA - sentBefore, 10)
+  }
+
+  func testALinkThatKeepsTheDefaultMtuSendsBulkRecordsAfterTheHold() {
+    pair().drop()
+    network.connect(a, b)
+    settle(500)
+    var results: [Int] = []
+    _ = a.engine.send(
+      peerId: b.peerId, path: "\(testApp.packageName)/chat", payload: Data(count: 200), replyTo: 0, ttlMs: 0, app: testApp,
+      bulk: true
+    ) { results.append($0) }
+    settle(ProtocolEngine.bulkHoldMs - 1_000)
+    XCTAssertTrue(results.isEmpty)
+
+    settle(2_000)
+
+    XCTAssertEqual(results, [DeliveryStatus.ok])
+  }
+
   func testARestoredPeripheralAsksTheCentralToStartOver() {
     let old = pair()
     let restarted = network.phone("B", b.address, b.peerId)

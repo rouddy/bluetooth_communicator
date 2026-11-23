@@ -187,6 +187,12 @@ final class ProtocolEngine {
   static let maxDecryptFailures = 5
   static let retryDelayMs: Int64 = 1_000
   static let probeTimeoutMs: Int64 = 3_000
+  /// Frames at the default ATT MTU (23), before any MTU exchange.
+  static let smallFrameSize = 20
+  /// How long a new link at `smallFrameSize` holds bulk records (file chunks) back,
+  /// waiting for its MTU to grow. See Engine.kt (BULK_HOLD_MS): 820 notifications per
+  /// chunk congest Android's ATT channel, which then drops responses to the peer's writes.
+  static let bulkHoldMs: Int64 = 3_000
 
   /// A built-in path that only gets an ACK: proof that a link is alive.
   static let pingPath = "/ping"
@@ -267,6 +273,9 @@ final class ProtocolEngine {
     let userInitiated: Bool
     var maxFrameSize: Int
     unowned let host: EngineHost
+    private let scheduler: EngineScheduler
+    private let upAt: Int64
+    private var bulkHold: Cancellable?
 
     let reassembler = FrameReassembler(maxRecordSize: maxMessageBytes)
     var phase = Phase.awaitHello
@@ -299,14 +308,22 @@ final class ProtocolEngine {
     private var pumping = false
     private var pumpAgain = false
 
-    init(id: Int, role: Role, deviceId: String, userInitiated: Bool, maxFrameSize: Int, host: EngineHost) {
+    init(
+      id: Int, role: Role, deviceId: String, userInitiated: Bool, maxFrameSize: Int, host: EngineHost,
+      scheduler: EngineScheduler
+    ) {
       self.id = id
       self.role = role
       self.deviceId = deviceId
       self.userInitiated = userInitiated
       self.maxFrameSize = maxFrameSize
       self.host = host
+      self.scheduler = scheduler
+      upAt = scheduler.now()
     }
+
+    /// The frame size grew: a held bulk record may start now.
+    func resume() { pump() }
 
     func enqueue(_ record: OutgoingRecord) {
       queues[record.priority].append(record)
@@ -330,6 +347,8 @@ final class ProtocolEngine {
     }
 
     func failAll() {
+      bulkHold?.cancel()
+      bulkHold = nil
       let records = queues.flatMap { $0 }
       queues = [[OutgoingRecord]](repeating: [], count: ProtocolEngine.priorityCount)
       writing = nil
@@ -363,6 +382,20 @@ final class ProtocolEngine {
       guard writing == nil, !closed,
         let record = queues.first(where: { !$0.isEmpty })?.first
       else { return }
+      if record.frames == nil, record.priority == ProtocolEngine.priorityBulk,
+        maxFrameSize <= ProtocolEngine.smallFrameSize
+      {
+        let wait = upAt + ProtocolEngine.bulkHoldMs - scheduler.now()
+        if wait > 0 {
+          if bulkHold == nil {
+            bulkHold = scheduler.schedule(wait) { [weak self] in
+              self?.bulkHold = nil
+              self?.pump()
+            }
+          }
+          return
+        }
+      }
       if record.frames == nil {
         record.tid = allocateTid()
         record.frames = Frames.split(record.bytes, tid: record.tid, maxFrameSize: maxFrameSize)
@@ -459,7 +492,8 @@ final class ProtocolEngine {
     }
     let link = Link(
       id: linkId, role: role, deviceId: deviceId, userInitiated: userInitiated,
-      maxFrameSize: min(max(maxFrameSize, Frames.minFrameSize), Frames.maxFrameSize), host: host)
+      maxFrameSize: min(max(maxFrameSize, Frames.minFrameSize), Frames.maxFrameSize), host: host,
+      scheduler: scheduler)
     links[linkId] = link
     host.log("Link \(linkId) up: \(role.rawValue) to \(deviceId), frames of \(link.maxFrameSize) bytes, user=\(userInitiated)")
     if role == .central {
@@ -478,6 +512,7 @@ final class ProtocolEngine {
     guard size != link.maxFrameSize else { return }
     link.maxFrameSize = size
     host.log("Link \(linkId) now uses frames of \(size) bytes")
+    link.resume()
   }
 
   /// A peripheral link that came back without its session: iOS state restoration

@@ -195,6 +195,19 @@ class ProtocolEngine(
         const val RETRY_DELAY_MS = 1_000L
         const val PROBE_TIMEOUT_MS = 3_000L
 
+        /** Frames at the default ATT MTU (23), before any MTU exchange. */
+        const val SMALL_FRAME_SIZE = 20
+
+        /**
+         * How long a new link at [SMALL_FRAME_SIZE] holds bulk records (file chunks)
+         * back, waiting for its MTU to grow. Split at 20 bytes, one 16 KiB chunk is
+         * 820 notifications; queueing that many congests Android's ATT channel, and
+         * while it's congested Android drops the responses to the peer's writes
+         * (seen with an iPhone reconnecting right after Bluetooth came back on: the
+         * iPhone gave up on the write after 30 s and disconnected).
+         */
+        const val BULK_HOLD_MS = 3_000L
+
         /** A built-in path that only gets an ACK: proof that a link is alive. */
         const val PING_PATH = "/ping"
         private const val MAX_COUNTER = 0xFFFF_FFFFL
@@ -252,6 +265,8 @@ class ProtocolEngine(
         var maxFrameSize: Int
     ) {
         val reassembler = FrameReassembler(MAX_MESSAGE_SIZE)
+        private val upAt = scheduler.now()
+        private var bulkHold: Cancellable? = null
         var phase = Phase.AWAIT_HELLO
         var ownHello: ByteArray? = null
         var ownNonce: ByteArray? = null
@@ -307,7 +322,12 @@ class ProtocolEngine(
             pump()
         }
 
+        /** The frame size grew: a held bulk record may start now. */
+        fun resume() = pump()
+
         fun failAll() {
+            bulkHold?.cancel()
+            bulkHold = null
             val records = queues.flatMap { it.toList() }
             queues.forEach { it.clear() }
             writing = null
@@ -338,6 +358,18 @@ class ProtocolEngine(
                 return
             }
             val record = queues.firstOrNull { it.isNotEmpty() }?.first() ?: return
+            if (record.frames == null && record.priority == PRIORITY_BULK && maxFrameSize <= SMALL_FRAME_SIZE) {
+                val wait = upAt + BULK_HOLD_MS - scheduler.now()
+                if (wait > 0) {
+                    if (bulkHold == null) {
+                        bulkHold = scheduler.schedule(wait) {
+                            bulkHold = null
+                            pump()
+                        }
+                    }
+                    return
+                }
+            }
             if (record.frames == null) {
                 record.tid = allocateTid()
                 record.frames = Frames.split(record.bytes, record.tid, maxFrameSize)
@@ -419,6 +451,7 @@ class ProtocolEngine(
         }
         link.maxFrameSize = size
         host.log("Link $linkId now uses frames of $size bytes")
+        link.resume()
     }
 
     /**

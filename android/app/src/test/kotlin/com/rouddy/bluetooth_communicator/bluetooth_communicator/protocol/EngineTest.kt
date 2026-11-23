@@ -563,6 +563,50 @@ class EngineTest {
     }
 
     @Test
+    fun `a new link at the default MTU holds bulk records until its frames grow`() {
+        pair().drop()
+        var framesFromA = 0
+        network.lose = { from, _ ->
+            if (from === a) framesFromA++
+            false
+        }
+        val connection = network.connect(a, b)
+        settle(500)
+        val sentBefore = framesFromA
+        val results = mutableListOf<Int>()
+        a.engine.send(b.peerId, "${TEST_APP.packageName}/chat", ByteArray(2_000), 0, 0, TEST_APP, bulk = true) {
+            results += it
+        }
+        settle(1_000)
+        assertTrue(b.delivered.isEmpty())
+
+        // The MTU exchange finishes: the record goes out in large frames.
+        a.engine.setMaxFrameSize(connection.centralLink, 512)
+        settle(500)
+
+        assertEquals(listOf(DeliveryStatus.OK), results)
+        assertEquals(1, b.delivered.size)
+        assertTrue("sent ${framesFromA - sentBefore} frames", framesFromA - sentBefore < 10)
+    }
+
+    @Test
+    fun `a link that keeps the default MTU sends bulk records after the hold`() {
+        pair().drop()
+        network.connect(a, b)
+        settle(500)
+        val results = mutableListOf<Int>()
+        a.engine.send(b.peerId, "${TEST_APP.packageName}/chat", ByteArray(200), 0, 0, TEST_APP, bulk = true) {
+            results += it
+        }
+        settle(ProtocolEngine.BULK_HOLD_MS - 1_000)
+        assertTrue(results.isEmpty())
+
+        settle(2_000)
+
+        assertEquals(listOf(DeliveryStatus.OK), results)
+    }
+
+    @Test
     fun `a restored peripheral asks the central to start over`() {
         val old = pair()
         val restarted = network.phone("B", b.address, b.peerId)
