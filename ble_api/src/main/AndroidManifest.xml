@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Android 11+ package visibility: apps bind to the communicator, and
+         BleApi.checkCommunicator reads its meta-data. -->
+    <queries>
+        <package android:name="com.rouddy.bluetooth_communicator.bluetooth_communicator" />
+    </queries>
+
+    <!-- Merged into every app that uses this library, the communicator included:
+         the other side's BleApi reads them without binding (build.gradle.kts fills
+         them in). -->
+    <application>
+        <meta-data
+            android:name="com.rouddy.bluetooth_communicator.api.VERSION"
+            android:value="${bleApiVersion}" />
+        <meta-data
+            android:name="com.rouddy.bluetooth_communicator.api.MIN_COMPATIBLE_VERSION"
+            android:value="${bleApiMinCompatibleVersion}" />
+        <meta-data
+            android:name="com.rouddy.bluetooth_communicator.api.HASH"
+            android:value="${bleApiHash}" />
+    </application>
+</manifest>

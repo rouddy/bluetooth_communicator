@@ -11,7 +11,8 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
 - `local.properties`에 `sdk.dir`이 필요합니다(Android Studio로 열면 만들어집니다).
-- AIDL 파일은 따로 복사하지 않고 `android/app/src/main/aidl`을 그대로 컴파일합니다.
+- AIDL은 `ble_api/`를 `:ble-api` 프로젝트로 포함해서 빌드합니다. 다른 앱은 GitHub Packages에 배포된 `com.rouddy.bluetooth_communicator:ble-api`를 씁니다([ble_api/README.md](../ble_api/README.md)).
+- bind하기 전에 `BleApi.checkCommunicator`로 호환성을 확인하고, 호환되지 않으면 상태 줄 아래에 무엇을 업데이트해야 하는지 표시합니다(로그 `Communicator: …`).
 - 상대 앱의 인증서 해시가 같아야 하므로, 두 폰에 같은 키(같은 컴퓨터의 debug 키 등)로 빌드한 APK를 설치합니다.
 
 ## 사용법

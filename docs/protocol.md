@@ -510,22 +510,22 @@ Galaxy에서 본 것
 
 ```aidl
 interface IBleCommunicator {
-    int getApiVersion();
-    List<PeerInfo> getPeers();
+    int getApiVersion() = 0;
+    List<PeerInfo> getPeers() = 1;
     // replyTo가 0이면 일반 메시지. 반환값은 이 메시지의 msgId(API v2)
     long send(String peerId, String path, in byte[] data, long replyTo,
-              long ttlMillis, IBleSendCallback callback);
-    void registerListener(IBleListener listener);
-    void unregisterListener(IBleListener listener);
+              long ttlMillis, IBleSendCallback callback) = 2;
+    void registerListener(IBleListener listener) = 3;
+    void unregisterListener(IBleListener listener) = 4;
 }
 
 oneway interface IBleListener {
-    void onMessage(String peerId, String path, in byte[] data, long msgId, long replyTo);
-    void onPeersChanged();
+    void onMessage(String peerId, String path, in byte[] data, long msgId, long replyTo) = 0;
+    void onPeersChanged() = 1;
 }
 
 oneway interface IBleSendCallback {
-    void onResult(long requestId, int status);   // 9절의 결과 코드
+    void onResult(long requestId, int status) = 0;   // 9절의 결과 코드
 }
 
 parcelable PeerInfo { String peerId; String name; boolean connected; }
@@ -540,6 +540,15 @@ parcelable PeerInfo { String peerId; String name; boolean connected; }
 - **등록된 앱 목록**: listener를 등록했거나 RECEIVE service를 선언한 앱을 (패키지명, 인증서 해시, 이름, 등록·마지막 사용 시각)으로 저장해 두고 설정 화면에 보여 줍니다. 같은 패키지명이라도 인증서가 다르면 새로 등록한 것으로 봅니다. 앱을 삭제하면 목록에서 지웁니다: 프로세스가 떠 있을 때는 동적 receiver(`PACKAGE_REMOVED`, 업데이트 제외), 떠 있지 않을 때는 manifest receiver(`PACKAGE_FULLY_REMOVED`, Android 8 이후에도 manifest로 받을 수 있는 예외 broadcast), 둘 다 놓친 것은 시작할 때 설치 여부를 확인해서 지웁니다. Android 11 패키지 가시성 때문에 RECEIVE service가 없는 앱은 부팅 후 한 번 bind하기 전에는 보이지 않으므로, 재부팅 뒤에는 목록에서 빠졌다가 다음 listener 등록 때 다시 들어옵니다.
 - 데이터 크기는 상대 `maxMessageSize`에서 헤더 크기를 뺀 값까지입니다(64KiB 수준이라 Binder 한도와는 상관없음).
 - 앱 개발자에게 알릴 것: 드물게 같은 메시지가 두 번 올 수 있으니 (peerId, msgId)로 거릅니다. `EXPIRED_UNCONFIRMED`는 상대가 받았을 수도 있다는 뜻입니다.
+
+### 배포와 호환성 (ble-api)
+
+- AIDL 파일은 `ble_api/`의 라이브러리(`com.rouddy.bluetooth_communicator:ble-api`, GitHub Packages)로 배포합니다. 앱은 파일을 복사하지 않고 이 라이브러리를 씁니다. Communicator도 같은 소스로 빌드합니다.
+- **인터페이스 규칙**: 메서드는 transaction id(`= n`)를 명시하고 바꾸지 않습니다. 특히 `getApiVersion()`은 항상 0입니다. 새 메서드와 parcelable 필드는 끝에만 추가합니다. 인터페이스가 바뀌면 `API_VERSION`을 올립니다.
+- **해시와 동결**: 빌드가 AIDL 파일들의 SHA-256(경로순, 주석과 서식 제외)을 계산합니다. 배포한 버전의 해시는 `ble_api/frozen-api.properties`에 남깁니다. 동결된 버전의 AIDL이 바뀌면 모든 빌드가 실패하고, release 빌드는 동결되지 않은 버전도 거부합니다.
+- **meta-data**: 라이브러리의 manifest가 `com.rouddy.bluetooth_communicator.api.VERSION`(=`API_VERSION`), `.MIN_COMPATIBLE_VERSION`(이 버전이 아직 함께 동작하는 가장 오래된 버전), `.HASH`를 사용하는 앱과 Communicator의 manifest에 넣습니다. 서로 bind하지 않고 PackageManager로 읽으므로, AIDL이 어긋난 상태에서도 확인할 수 있습니다.
+- **판정**(`BleApi`, `BleCompatibility`): 버전이 같으면 해시가 같아야 합니다(다르면 `AIDL_MISMATCH`). 버전이 다르면 더 새로운 쪽의 `MIN_COMPATIBLE_VERSION` 이상이어야 합니다. Communicator가 모자라면 `COMMUNICATOR_UPDATE_REQUIRED`, 앱이 모자라면 `LIBRARY_UPDATE_REQUIRED`입니다. meta-data가 없는 쪽은 ble-api 이전 빌드(또는 AIDL 복사본)로 보고 업데이트가 필요하다고 판정합니다. 상대가 없으면 `NOT_INSTALLED`입니다.
+- 앱은 bind하기 전(그리고 `onBindingDied` 뒤) `BleApi.checkCommunicator`로, Communicator는 `apps` 이벤트를 만들 때 `BleApi.checkApp`으로 확인합니다. 결과는 예외가 아니라 값이고, bind를 막을지는 앱이 정합니다.
 
 ## 12. 플랫폼 채널 변경
 

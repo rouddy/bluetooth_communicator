@@ -24,3 +24,8 @@ plugins {
 }
 
 include(":app")
+
+// The AIDL interface other apps use (docs/protocol.md 11절), built from ble_api/ so
+// the communicator always has the current one; it's also published on its own.
+include(":ble-api")
+project(":ble-api").projectDir = file("../ble_api")
