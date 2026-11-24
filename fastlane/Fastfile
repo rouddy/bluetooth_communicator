@@ -1,0 +1,131 @@
+# App releases (docs/release.md). Run from the repository root:
+#
+#   bundle exec fastlane android internal   # the Play internal testing track
+#   bundle exec fastlane ios beta           # TestFlight (CI only)
+#
+# .github/workflows/release.yml runs both when a v<version> tag is pushed. The
+# version name comes from pubspec.yaml; each store's next build number is used, so
+# the "+n" in pubspec.yaml doesn't matter.
+
+skip_docs
+
+ROOT = `git rev-parse --show-toplevel`.strip
+ANDROID_PACKAGE = "com.rouddy.bluetooth_communicator.bluetooth_communicator"
+IOS_BUNDLE_ID = "com.rouddy.bluetoothcommunicator.bluetoothCommunicator"
+IOS_TEAM_ID = "7AZGU4T6FD"
+
+# "1.1.0" of pubspec.yaml's "version: 1.1.0+1".
+def version_name
+  File.read(File.join(ROOT, "pubspec.yaml"))[/^version:\s*([^+\s]+)/, 1] ||
+    UI.user_error!("No version in pubspec.yaml")
+end
+
+def env!(name)
+  value = ENV[name].to_s
+  UI.user_error!("#{name} isn't set (docs/release.md)") if value.empty?
+  value
+end
+
+def flutter(*args)
+  Dir.chdir(ROOT) { sh("flutter", *args) }
+end
+
+platform :android do
+  desc "Builds the release AAB and uploads it to the Play internal testing track"
+  lane :internal do
+    json_key = env!("PLAY_SERVICE_ACCOUNT_JSON")
+    unless File.exist?(File.join(ROOT, "android/key.properties"))
+      UI.user_error!("android/key.properties is missing, so the AAB would be signed with the debug key")
+    end
+
+    # A version code can't be used twice; take the next one above every track.
+    codes = %w[internal alpha beta production].flat_map do |track|
+      google_play_track_version_codes(package_name: ANDROID_PACKAGE, track: track, json_key_data: json_key)
+    rescue StandardError => e
+      UI.important("Couldn't read the #{track} track: #{e.message}")
+      []
+    end
+    build_number = codes.map(&:to_i).max.to_i + 1
+    UI.message("Releasing #{version_name} (#{build_number})")
+
+    flutter("build", "appbundle", "--release", "--build-name=#{version_name}", "--build-number=#{build_number}")
+    upload_to_play_store(
+      package_name: ANDROID_PACKAGE,
+      json_key_data: json_key,
+      track: "internal",
+      aab: File.join(ROOT, "build/app/outputs/bundle/release/app-release.aab"),
+      # Play only takes "draft" until the app has been published once.
+      release_status: ENV.fetch("PLAY_RELEASE_STATUS", "completed"),
+      skip_upload_apk: true,
+      skip_upload_metadata: true,
+      skip_upload_changelogs: true,
+      skip_upload_images: true,
+      skip_upload_screenshots: true
+    )
+  end
+end
+
+platform :ios do
+  desc "Builds, signs, and uploads to TestFlight (CI only: it re-signs the checkout)"
+  lane :beta do
+    UI.user_error!("ios beta runs on CI only: it changes ios/Runner.xcodeproj's signing") unless is_ci
+
+    setup_ci # A temporary keychain, made the default.
+    api_key = app_store_connect_api_key(
+      key_id: env!("ASC_KEY_ID"),
+      issuer_id: env!("ASC_ISSUER_ID"),
+      key_content: env!("ASC_KEY_P8_BASE64"),
+      is_key_content_base64: true
+    )
+
+    # The distribution certificate with its private key. Apple keeps no copy of the
+    # key, so a fresh machine can't sign with the API key alone.
+    certificate = File.join(Dir.tmpdir, "ios-distribution.p12")
+    File.binwrite(certificate, env!("IOS_DIST_CERT_P12_BASE64").unpack1("m"))
+    import_certificate(
+      certificate_path: certificate,
+      certificate_password: env!("IOS_DIST_CERT_PASSWORD"),
+      keychain_name: ENV.fetch("MATCH_KEYCHAIN_NAME"),
+      keychain_password: ENV.fetch("MATCH_KEYCHAIN_PASSWORD", "")
+    )
+
+    build_number = latest_testflight_build_number(
+      api_key: api_key,
+      app_identifier: IOS_BUNDLE_ID,
+      initial_build_number: 0
+    ).to_i + 1
+    UI.message("Releasing #{version_name} (#{build_number})")
+
+    # Generated.xcconfig with the version; Xcode compiles the Dart code while archiving.
+    flutter("build", "ios", "--release", "--config-only", "--build-name=#{version_name}", "--build-number=#{build_number}")
+
+    # An App Store profile for that certificate, made or fetched with the API key.
+    get_provisioning_profile(api_key: api_key, app_identifier: IOS_BUNDLE_ID, team_id: IOS_TEAM_ID)
+    profile = lane_context[SharedValues::SIGH_NAME]
+    # The project keeps automatic signing for development; only this checkout changes.
+    update_code_signing_settings(
+      path: File.join(ROOT, "ios/Runner.xcodeproj"),
+      targets: ["Runner"],
+      build_configurations: ["Release"],
+      use_automatic_signing: false,
+      team_id: IOS_TEAM_ID,
+      code_sign_identity: "Apple Distribution",
+      profile_name: profile
+    )
+
+    build_app(
+      workspace: File.join(ROOT, "ios/Runner.xcworkspace"),
+      scheme: "Runner",
+      configuration: "Release",
+      export_method: "app-store",
+      export_options: { provisioningProfiles: { IOS_BUNDLE_ID => profile } },
+      output_directory: File.join(ROOT, "build/ios/fastlane"),
+      output_name: "Runner.ipa"
+    )
+    upload_to_testflight(
+      api_key: api_key,
+      app_identifier: IOS_BUNDLE_ID,
+      skip_waiting_for_build_processing: true
+    )
+  end
+end

@@ -20,9 +20,13 @@ cd ios && xcodebuild test -workspace Runner.xcworkspace -scheme Runner -destinat
 python3 -I test_vectors/generate.py              # regenerate the shared protocol vectors (needs the `cryptography` package)
 flutter drive --profile --keep-app-running --driver=test_driver/integration_test.dart --target=integration_test/pairing_test.dart -d <device-id> --dart-define=PEER_NAME=<name> --dart-define=MODE=connect   # two-phone app pairing; see the file for modes. Without --keep-app-running, flutter drive uninstalls the app when it ends (peers and peerId gone)
 flutter build apk / flutter build ios
+bundle exec fastlane android internal            # release AAB to the Play internal testing track (needs android/key.properties and PLAY_SERVICE_ACCOUNT_JSON)
+bundle exec fastlane ios beta                    # TestFlight; CI only (it re-signs the checkout)
 ```
 
 Native code isn't covered by `flutter analyze`. To check it, build it: `cd android && ./gradlew assembleDebug` for Kotlin, Xcode or `flutter build ios --no-codesign` for Swift.
+
+Releases (`docs/release.md`): pushing a tag `v<pubspec version>` runs `.github/workflows/release.yml`, which runs the two fastlane lanes (`fastlane/Fastfile`, root `Gemfile`). The version name comes from `pubspec.yaml`, and the build number is each store's next one (the highest version code on any Play track + 1, the latest TestFlight build + 1). Android release builds are signed with the upload key named in `android/key.properties` (written from secrets on CI), or with the debug key when it's missing. iOS signs on CI with an Apple Distribution `.p12` from secrets (Apple keeps no copy of its private key, so the API key alone can't sign on a fresh machine); the App Store Connect API key makes or fetches the App Store profile, gets the build number, and uploads. The lane switches the checkout's `Runner` Release signing to manual; the project itself keeps automatic signing. `ble-api` tags (`ble-api-v*`) don't match the app's `v*` tags.
 
 ## Architecture
 

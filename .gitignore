@@ -46,3 +46,15 @@ app.*.map.json
 
 # Widget Preview related
 .widget_preview/
+
+# fastlane (docs/release.md); keys and certificates only ever come from CI secrets
+/fastlane/report.xml
+/fastlane/Preview.html
+/fastlane/screenshots
+/fastlane/test_output
+/vendor/bundle/
+*.p8
+*.p12
+*.mobileprovision
+*.ipa
+*.dSYM.zip
