@@ -10,7 +10,7 @@ pluginManagement {
     // build.gradle.kts can't name a version: in the other two builds the plugin is
     // already on the classpath.
     plugins {
-        id("com.android.library") version "9.1.0"
+        id("com.android.library") version "9.3.1"
     }
 }
 
