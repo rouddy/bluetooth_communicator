@@ -23,7 +23,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  FLUTTER_VERSION: 3.47.7
+  FLUTTER_VERSION: 3.50.1
   RUBY_VERSION: '3.3'
   FASTLANE_SKIP_UPDATE_CHECK: 'true'
   FASTLANE_HIDE_CHANGELOG: 'true'
