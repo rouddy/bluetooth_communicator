@@ -12,7 +12,7 @@ skip_docs
 ROOT = `git rev-parse --show-toplevel`.strip
 ANDROID_PACKAGE = "com.rouddy.bluetooth_communicator.bluetooth_communicator"
 IOS_BUNDLE_ID = "com.rouddy.bluetoothcommunicator.bluetoothCommunicator"
-IOS_TEAM_ID = "7AZGU4T6FD"
+IOS_TEAM_ID = "B56B7YRWDS"
 
 # "1.1.0" of pubspec.yaml's "version: 1.1.0+1".
 def version_name

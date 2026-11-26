@@ -47,7 +47,7 @@ git push origin v1.2.0
 
 ### iOS
 
-1. App Store Connect에 앱을 등록합니다(번들 ID `com.rouddy.bluetoothcommunicator.bluetoothCommunicator`, 팀 `7AZGU4T6FD`).
+1. App Store Connect에 앱을 등록합니다(번들 ID `com.rouddy.bluetoothcommunicator.bluetoothCommunicator`, 팀 `B56B7YRWDS`). 번들 ID는 한 팀에만 등록될 수 있으므로, 예전 팀(`7AZGU4T6FD`)에 이미 등록돼 있다면 그쪽에서 지운 뒤 등록합니다.
 2. **App Store Connect API 키**를 만듭니다.
    - Users and Access > Integrations > App Store Connect API에서 팀 키를 만듭니다.
    - 역할은 App Manager 이상이어야 하고, 프로파일을 만들려면 인증서·식별자·프로파일 접근 권한이 있어야 합니다.
@@ -57,7 +57,9 @@ git push origin v1.2.0
    - 키체인 접근에서 인증서와 개인 키를 함께 `.p12`로 내보내고 암호를 정합니다.
    - 인증서는 1년 동안 유효하므로, 만료되면 새로 만들어 Secret을 바꿉니다.
    - API 키만으로는 부족합니다. Apple은 서명 개인 키를 보관하지 않으므로, 매번 새로 만들어지는 CI 머신은 이 인증서 없이는 서명하지 못합니다. 프로파일은 lane이 API 키로 만들거나 내려받습니다.
-4. **수출 규정(암호화)**: 이 앱은 자체 프로토콜에 AES-GCM과 ECDH를 씁니다. `Info.plist`에 `ITSAppUsesNonExemptEncryption`이 없으면, 빌드마다 App Store Connect에서 수출 규정 질문에 답해야 테스터가 설치할 수 있습니다. 법적 판단이 필요한 값이라 자동으로 넣지 않았습니다. 판단한 뒤 `Info.plist`에 넣으면 이 단계가 없어집니다.
+4. **수출 규정(암호화)**: 이 앱은 자체 프로토콜에서 CryptoKit(Apple OS 내장)의 표준 알고리즘(AES-GCM, P-256 ECDH, HKDF)을 씁니다. 이를 수출 서류가 필요 없는 사용으로 판단해서, `Info.plist`에 `ITSAppUsesNonExemptEncryption = false`를 넣었습니다. 그래서 빌드마다 수출 규정 질문을 묻지 않습니다.
+   - 암호화 사용이 바뀌면 다시 판단합니다. 예를 들어 Apple OS가 아닌 암호 라이브러리를 쓰거나 비표준 알고리즘을 쓰는 경우입니다.
+   - 서류를 제출해야 한다면, 값을 `true`로 바꾸고 Apple이 준 코드를 `ITSEncryptionExportComplianceCode`에 넣습니다.
 5. TestFlight 내부 테스터는 처리가 끝나면 바로 받습니다. 외부 테스터에게는 베타 심사가 필요합니다.
 
 ### GitHub Secrets
