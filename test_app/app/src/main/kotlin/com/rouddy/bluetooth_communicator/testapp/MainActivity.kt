@@ -17,6 +17,8 @@ import android.widget.EditText
 import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.TextView
+import com.rouddy.bluetooth_communicator.api.BleApi
+import com.rouddy.bluetooth_communicator.api.BleCompatibility
 import com.rouddy.bluetooth_communicator.api.IBleCommunicator
 import com.rouddy.bluetooth_communicator.api.IBleListener
 import com.rouddy.bluetooth_communicator.api.IBleSendCallback
@@ -36,6 +38,7 @@ class MainActivity : Activity() {
     private var peers: List<PeerInfo> = emptyList()
     private var pendingText: String? = null
     private var bound = false
+    private var compatibility = BleCompatibility.COMPATIBLE
 
     private lateinit var status: TextView
     private lateinit var peerSpinner: Spinner
@@ -52,9 +55,9 @@ class MainActivity : Activity() {
             service = communicator
             try {
                 communicator.registerListener(listener)
-                status.text = "서비스 연결됨 (API v${communicator.apiVersion})"
+                showStatus("서비스 연결됨 (API v${communicator.apiVersion})")
             } catch (e: RemoteException) {
-                status.text = "서비스 오류: ${e.message}"
+                showStatus("서비스 오류: ${e.message}")
             }
             refreshPeers()
             sendPendingText()
@@ -63,7 +66,7 @@ class MainActivity : Activity() {
         // The communicator's process died; Android binds again once it's back.
         override fun onServiceDisconnected(name: ComponentName) {
             service = null
-            status.text = "서비스 연결 끊김 · 다시 연결하는 중…"
+            showStatus("서비스 연결 끊김 · 다시 연결하는 중…")
         }
 
         // The communicator was updated or reinstalled: this binding is over for good.
@@ -71,7 +74,7 @@ class MainActivity : Activity() {
             service = null
             bound = false
             unbindService(this)
-            status.text = "서비스가 다시 시작됨 · 다시 연결하는 중…"
+            showStatus("서비스가 다시 시작됨 · 다시 연결하는 중…")
             status.postDelayed({ if (!isDestroyed) bind() }, REBIND_DELAY_MS)
         }
     }
@@ -138,12 +141,32 @@ class MainActivity : Activity() {
         super.onDestroy()
     }
 
+    // Checked before every bind: onBindingDied means the communicator was updated.
+    // An incompatible one is still bound (this is a test app); a real app might stop
+    // and ask for the update.
     private fun bind() {
+        compatibility = BleApi.checkCommunicator(this)
+        Log.i(TAG, "Communicator: $compatibility (our ble-api: v${BleApi.VERSION})")
+        if (compatibility == BleCompatibility.NOT_INSTALLED) {
+            showStatus("BLE Communicator 앱이 설치되어 있지 않습니다")
+            return
+        }
         val intent = Intent(IBleCommunicator.ACTION_BIND).setPackage(IBleCommunicator.SERVICE_PACKAGE)
         bound = bindService(intent, connection, Context.BIND_AUTO_CREATE)
         if (!bound) {
-            status.text = "BLE Communicator 앱이 설치되어 있지 않습니다"
+            showStatus("BLE Communicator 서비스에 연결하지 못했습니다")
         }
+    }
+
+    /** [text], with what to update under it while the communicator isn't compatible. */
+    private fun showStatus(text: String) {
+        val warning = when (compatibility) {
+            BleCompatibility.COMPATIBLE, BleCompatibility.NOT_INSTALLED -> null
+            BleCompatibility.COMMUNICATOR_UPDATE_REQUIRED -> "BLE Communicator를 업데이트해야 합니다"
+            BleCompatibility.LIBRARY_UPDATE_REQUIRED -> "이 앱의 ble-api가 오래되었습니다 · 앱을 업데이트해야 합니다"
+            BleCompatibility.AIDL_MISMATCH -> "AIDL이 BLE Communicator와 다릅니다 (같은 API 버전)"
+        }
+        status.text = if (warning == null) text else "$text\n⚠ $warning"
     }
 
     private fun refreshPeers() {
@@ -162,9 +185,9 @@ class MainActivity : Activity() {
         )
         peers.indexOfFirst { it.peerId == selected }.takeIf { it >= 0 }?.let(peerSpinner::setSelection)
         if (peers.isEmpty()) {
-            status.text = "이 앱이 설치된 페어링 기기가 없습니다"
+            showStatus("이 앱이 설치된 페어링 기기가 없습니다")
         } else {
-            status.text = "서비스 연결됨 · 기기 ${peers.size}대"
+            showStatus("서비스 연결됨 · 기기 ${peers.size}대")
         }
         Log.i(TAG, "Peers: ${peers.map { "${it.name}(${it.peerId}, connected=${it.connected})" }}")
     }

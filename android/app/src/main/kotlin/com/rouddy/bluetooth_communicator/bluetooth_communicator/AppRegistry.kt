@@ -13,6 +13,8 @@ import android.os.Looper
 import android.os.RemoteException
 import android.util.Log
 import androidx.core.content.ContextCompat
+import com.rouddy.bluetooth_communicator.api.BleApi
+import com.rouddy.bluetooth_communicator.api.BleCompatibility
 import com.rouddy.bluetooth_communicator.api.IBleCommunicator
 import com.rouddy.bluetooth_communicator.api.IBleListener
 import com.rouddy.bluetooth_communicator.bluetooth_communicator.protocol.AppIdentity
@@ -138,13 +140,18 @@ class AppRegistry(private val context: Context) : AppRouter {
         }
     }
 
-    /** Installed or updated: its certificate, label, or RECEIVE service may differ now. */
+    /**
+     * Installed or updated: its certificate, label, RECEIVE service, or ble-api
+     * version (the `apps` event's compatibility) may differ now.
+     */
     private fun onPackageChanged(packageName: String) {
         certHashes.remove(packageName)
         val declaresReceiver = receiveServices(packageName).isNotEmpty()
-        val changed = if (declaresReceiver || apps[packageName] != null) registerPackage(packageName) else false
+        if (declaresReceiver || apps[packageName] != null) {
+            registerPackage(packageName)
+        }
         refreshCaps()
-        if (changed) {
+        if (apps[packageName] != null) {
             BleRuntime.onAppsChanged()
         }
     }
@@ -194,6 +201,12 @@ class AppRegistry(private val context: Context) : AppRouter {
         }
         listeners[binder] = Listener(listener, packages, death)
         packages.forEach(::registerPackage)
+        packages.filter { it != context.packageName }.forEach { packageName ->
+            val compatibility = BleApi.checkApp(context, packageName)
+            if (compatibility != BleCompatibility.COMPATIBLE) {
+                Log.w(TAG, "$packageName registered, but its ble-api isn't compatible: $compatibility")
+            }
+        }
         refreshCaps()
         BleRuntime.onAppsChanged()
     }
@@ -209,7 +222,10 @@ class AppRegistry(private val context: Context) : AppRouter {
         }
     }
 
-    /** The `apps` event for Dart: the registered apps and whether each can receive now. */
+    /**
+     * The `apps` event for Dart: the registered apps, whether each can receive now,
+     * and whether its ble-api and ours can talk.
+     */
     fun appsEvent(): Map<String, Any?> {
         val listening = listeners.values.flatMap { it.packages }.toSet()
         val withService = receiveServices().map { it.packageName }.toSet()
@@ -222,10 +238,19 @@ class AppRegistry(private val context: Context) : AppRouter {
                     "listening" to (app.packageName in listening),
                     "receiveService" to (app.packageName in withService),
                     "registeredAt" to app.registeredAt,
-                    "lastUsedAt" to app.lastUsedAt
+                    "lastUsedAt" to app.lastUsedAt,
+                    "compatibility" to compatibilityName(BleApi.checkApp(context, app.packageName))
                 )
             }
         )
+    }
+
+    private fun compatibilityName(compatibility: BleCompatibility) = when (compatibility) {
+        BleCompatibility.COMPATIBLE -> "compatible"
+        BleCompatibility.COMMUNICATOR_UPDATE_REQUIRED -> "communicatorUpdateRequired"
+        BleCompatibility.LIBRARY_UPDATE_REQUIRED -> "libraryUpdateRequired"
+        BleCompatibility.AIDL_MISMATCH -> "aidlMismatch"
+        BleCompatibility.NOT_INSTALLED -> "notInstalled"
     }
 
     override fun localCaps(): Capabilities = caps

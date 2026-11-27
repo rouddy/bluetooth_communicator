@@ -11,6 +11,14 @@ import com.rouddy.bluetooth_communicator.api.PeerInfo;
  * An app can only reach the same app (package name and signing certificate) on the
  * other phone, and only send paths that start with its own package name. A message
  * may rarely arrive twice; filter by (peerId, msgId).
+ *
+ * Check BleApi.checkCommunicator() before binding: it says whether this copy of the
+ * interface and the installed communicator's can talk.
+ *
+ * Changing these files (ble_api/README.md): every method keeps its transaction id
+ * ("= n"), and new methods and parcelable fields go at the end. Any change to the
+ * interface raises API_VERSION; the build refuses a changed interface under a
+ * version that was already frozen (frozen-api.properties).
  */
 interface IBleCommunicator {
     /**
@@ -42,10 +50,11 @@ interface IBleCommunicator {
     /** Sent, but not acknowledged; the peer may have received it. */
     const int STATUS_EXPIRED_UNCONFIRMED = 1001;
 
-    int getApiVersion();
+    /** Never moves (id 0): an app of any version can ask it. */
+    int getApiVersion() = 0;
 
     /** Paired phones on which the calling app can receive. */
-    List<PeerInfo> getPeers();
+    List<PeerInfo> getPeers() = 1;
 
     /**
      * Sends data to path on peerId; path must be "<calling package>/...". replyTo is
@@ -59,9 +68,9 @@ interface IBleCommunicator {
      * fails right away (DENIED, MALFORMED, BUSY) gets an id too.
      */
     long send(String peerId, String path, in byte[] data, long replyTo, long ttlMillis,
-            IBleSendCallback callback);
+            IBleSendCallback callback) = 2;
 
-    void registerListener(IBleListener listener);
+    void registerListener(IBleListener listener) = 3;
 
-    void unregisterListener(IBleListener listener);
+    void unregisterListener(IBleListener listener) = 4;
 }

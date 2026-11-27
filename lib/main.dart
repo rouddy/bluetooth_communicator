@@ -673,9 +673,21 @@ class _SettingsPageState extends State<SettingsPage> {
             else
               for (final app in controller.registeredApps)
                 ListTile(
-                  leading: Icon(app.canReceive ? Icons.apps : Icons.apps_outlined),
+                  leading: Icon(
+                    app.compatibilityWarning != null
+                        ? Icons.warning_amber
+                        : app.canReceive
+                        ? Icons.apps
+                        : Icons.apps_outlined,
+                  ),
                   title: Text(app.label),
-                  subtitle: Text('${app.packageName}\n${app.receiveStatus}'),
+                  subtitle: Text(
+                    [
+                      app.packageName,
+                      app.receiveStatus,
+                      ?app.compatibilityWarning,
+                    ].join('\n'),
+                  ),
                   isThreeLine: true,
                 ),
           ],
@@ -1959,6 +1971,7 @@ class RegisteredApp {
     required this.label,
     this.listening = false,
     this.receiveService = false,
+    this.compatibility = 'compatible',
   });
 
   factory RegisteredApp.fromMap(Map<String, dynamic> map) => RegisteredApp(
@@ -1968,6 +1981,7 @@ class RegisteredApp {
         : map['packageName'] as String? ?? '',
     listening: map['listening'] == true,
     receiveService: map['receiveService'] == true,
+    compatibility: map['compatibility'] as String? ?? 'compatible',
   );
 
   final String packageName;
@@ -1979,12 +1993,23 @@ class RegisteredApp {
   /// It declares a RECEIVE service, so it gets messages while it isn't running.
   final bool receiveService;
 
+  /// Whether its ble-api and ours can talk (`BleCompatibility` in lowerCamel).
+  final String compatibility;
+
   bool get canReceive => listening || receiveService;
 
   String get receiveStatus => switch ((listening, receiveService)) {
     (true, _) => '실행 중 · 메시지 받는 중',
     (false, true) => '앱이 꺼져 있어도 메시지를 받습니다',
     (false, false) => '앱을 열면 메시지를 받습니다',
+  };
+
+  /// What has to be updated for it to work with this app, or null if nothing.
+  String? get compatibilityWarning => switch (compatibility) {
+    'communicatorUpdateRequired' => '이 앱이 쓰려면 Bluetooth Communicator를 업데이트해야 합니다',
+    'libraryUpdateRequired' => '이 앱을 업데이트해야 합니다 (연동 라이브러리가 오래됨)',
+    'aidlMismatch' => '연동 인터페이스(AIDL)가 다릅니다 · 개발자 확인 필요',
+    _ => null,
   };
 }
 

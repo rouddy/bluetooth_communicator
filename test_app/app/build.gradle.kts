@@ -14,20 +14,13 @@ android {
         versionName = "1.0"
     }
 
-    buildFeatures {
-        aidl = true
-    }
-
-    // The communicator's AIDL interface, compiled from its own sources so the two
-    // apps can't drift apart.
-    sourceSets {
-        getByName("main") {
-            aidl.directories.add("../../android/app/src/main/aidl")
-        }
-    }
-
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+}
+
+dependencies {
+    // The communicator's AIDL interface and BleApi (settings.gradle.kts).
+    implementation(project(":ble-api"))
 }

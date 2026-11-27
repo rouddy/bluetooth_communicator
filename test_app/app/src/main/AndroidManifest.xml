@@ -1,11 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- Android 11+ package visibility: needed to bind to the communicator. -->
-    <queries>
-        <package android:name="com.rouddy.bluetooth_communicator.bluetooth_communicator" />
-    </queries>
-
+    <!-- ble-api's manifest adds the <queries> entry for the communicator and the
+         meta-data its BleApi reads. -->
     <application
         android:icon="@android:drawable/sym_action_chat"
         android:label="BLE Test App"
