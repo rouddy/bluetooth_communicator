@@ -11,7 +11,13 @@ plugins {
 }
 
 group = "com.rouddy.bluetooth_communicator"
-version = findProperty("bleApi.version") as String
+// bleApi.version (x.y.z), or the published version a bleApi/<x.y.z><suffix> tag asks
+// for (bleApi.publishVersion, .github/workflows/ble-api.yml), whose x.y.z has to be it.
+val bleApiBaseVersion = findProperty("bleApi.version") as String
+version = findProperty("bleApi.publishVersion") as String? ?: bleApiBaseVersion
+check(Regex("""(\d+\.\d+\.\d+)[0-9A-Za-z._+-]*""").matchEntire(version.toString())?.groupValues?.get(1) == bleApiBaseVersion) {
+    "Version $version isn't bleApi.version $bleApiBaseVersion with an optional suffix"
+}
 
 // What the AIDL says about itself, worked out while the build is configured and
 // compiled into BleApiInfo and the manifest's <meta-data>.
@@ -24,8 +30,8 @@ val bleApiMinVersion: Int = (findProperty("bleApi.minCompatibleVersion") as Stri
 val bleApiHash: String = aidlHash(aidlDir)
 val frozenApi = file("frozen-api.properties")
 
-check(version.toString().substringBefore('.') == bleApiVersion.toString()) {
-    "bleApi.version $version doesn't start with API_VERSION $bleApiVersion"
+check(bleApiBaseVersion.substringBefore('.') == bleApiVersion.toString()) {
+    "bleApi.version $bleApiBaseVersion doesn't start with API_VERSION $bleApiVersion"
 }
 
 android {

@@ -1,11 +1,11 @@
 # Releases the app with fastlane (fastlane/Fastfile, docs/release.md): Android to the
-# Play internal testing track, iOS to TestFlight. A tag v<pubspec version> runs both;
-# Run workflow picks either.
+# Play internal testing track, iOS to TestFlight. A tag app/<x.y.z> (pubspec.yaml's
+# version name, nothing after it) runs both; Run workflow picks either.
 name: release
 
 on:
   push:
-    tags: ['v*']
+    tags: ['app/*']
   workflow_dispatch:
     inputs:
       platform:
@@ -33,13 +33,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - name: Check that the tag is pubspec.yaml's version
+      - name: Check that the tag is app/<pubspec.yaml's version>
         run: |
           name=$(sed -n 's/^version: *\([^+ ]*\).*/\1/p' pubspec.yaml)
           echo "Version $name"
-          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$name" ]; then
-            echo "::error::Tag $GITHUB_REF_NAME doesn't match version $name in pubspec.yaml"
-            exit 1
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            if [[ ! "$GITHUB_REF_NAME" =~ ^app/[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::Tag $GITHUB_REF_NAME isn't app/<x.y.z>"
+              exit 1
+            fi
+            if [ "$GITHUB_REF_NAME" != "app/$name" ]; then
+              echo "::error::Tag $GITHUB_REF_NAME doesn't match version $name in pubspec.yaml"
+              exit 1
+            fi
           fi
 
   android:

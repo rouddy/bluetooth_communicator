@@ -3,7 +3,7 @@
 #   bundle exec fastlane android internal   # the Play internal testing track
 #   bundle exec fastlane ios beta           # TestFlight (CI only)
 #
-# .github/workflows/release.yml runs both when a v<version> tag is pushed. The
+# .github/workflows/release.yml runs both when an app/<version> tag is pushed. The
 # version name comes from pubspec.yaml; each store's next build number is used, so
 # the "+n" in pubspec.yaml doesn't matter.
 

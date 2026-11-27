@@ -1,13 +1,13 @@
 # 앱 배포 (fastlane + GitHub Actions)
 
-태그 `v<pubspec.yaml의 버전>`을 push하면 [.github/workflows/release.yml](../.github/workflows/release.yml)이 [fastlane/Fastfile](../fastlane/Fastfile)로 두 앱을 배포합니다.
+태그 `app/<pubspec.yaml의 버전>`을 push하면 [.github/workflows/release.yml](../.github/workflows/release.yml)이 [fastlane/Fastfile](../fastlane/Fastfile)로 두 앱을 배포합니다.
 
 | 플랫폼 | lane | 결과 |
 |---|---|---|
 | Android | `bundle exec fastlane android internal` | upload 키로 서명한 AAB를 Play **내부 테스트** 트랙에 올립니다 |
 | iOS | `bundle exec fastlane ios beta` | App Store용으로 서명한 IPA를 **TestFlight**에 올립니다(심사 제출은 사람이 함) |
 
-- 버전 이름은 `pubspec.yaml`의 `version`에서 가져옵니다. 태그와 다르면 workflow가 멈춥니다.
+- 버전 이름은 `pubspec.yaml`의 `version`에서 가져옵니다. 태그는 `app/x.y.z` 형태여야 하고(접미사 없음), `x.y.z`가 그 버전 이름과 같아야 합니다. 다르면 workflow가 멈춥니다.
 - 빌드 번호는 각 스토어에서 정합니다. Play는 모든 트랙의 version code 중 가장 큰 값 + 1이고, TestFlight는 최신 빌드 번호 + 1입니다. 그래서 `version`의 `+n`은 쓰이지 않습니다.
 - Actions 화면의 **Run workflow**로 한 플랫폼만 실행할 수도 있습니다. 이때는 태그를 확인하지 않습니다.
 
@@ -18,8 +18,8 @@
 3. 태그를 push합니다.
 
 ```bash
-git tag v1.2.0
-git push origin v1.2.0
+git tag app/1.2.0
+git push origin app/1.2.0
 ```
 
 ## 처음 한 번 준비할 것

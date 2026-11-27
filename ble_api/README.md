@@ -2,7 +2,7 @@
 
 Bluetooth Communicator의 AIDL 인터페이스(`IBleCommunicator`, docs/protocol.md 11절)와, 설치된 Communicator와 이 앱이 같은 인터페이스로 통신할 수 있는지 알려 주는 `BleApi`입니다. 다른 앱은 `.aidl` 파일을 복사하지 말고 이 라이브러리를 씁니다.
 
-- 좌표: `com.rouddy.bluetooth_communicator:ble-api:<version>`. 버전의 major는 `IBleCommunicator.API_VERSION`입니다.
+- 좌표: `com.rouddy.bluetooth_communicator:ble-api:<version>`. 버전은 `x.y.z`이고 뒤에 접미사가 붙을 수 있습니다(예: `2.0.0-beta.1`). major는 `IBleCommunicator.API_VERSION`입니다.
 - Communicator(`android/`)와 `test_app/`은 배포본 대신 이 디렉터리를 `:ble-api` 프로젝트로 포함해서 빌드합니다.
 
 ## 앱에서 쓰기
@@ -81,12 +81,17 @@ when (BleApi.checkCommunicator(context)) {
 
 ## 배포
 
-`.github/workflows/ble-api.yml`이 `ble_api/`가 바뀔 때마다 검사, 테스트, 빌드를 합니다. 태그 `ble-api-v<bleApi.version>`을 push하면 GitHub Packages에 배포합니다.
+`.github/workflows/ble-api.yml`이 `ble_api/`가 바뀔 때마다 검사, 테스트, 빌드를 합니다. 태그 `bleApi/<x.y.z><접미사>`를 push하면 GitHub Packages에 배포합니다.
+
+- `x.y.z`는 `gradle.properties`의 `bleApi.version`과 같아야 합니다. 다르면 workflow가 멈춥니다.
+- 배포 버전은 `bleApi/` 뒤의 전체입니다. 접미사는 없어도 되고, Maven 버전에 쓸 수 있는 문자(영문, 숫자, `.`, `_`, `+`, `-`)만 됩니다.
 
 ```bash
-git tag ble-api-v2.0.0
-git push origin ble-api-v2.0.0
+git tag bleApi/2.0.0           # 2.0.0으로 배포
+git tag bleApi/2.0.0-beta.1    # 2.0.0-beta.1로 배포
+git push origin bleApi/2.0.0
 ```
 
 - 같은 버전은 다시 배포할 수 없습니다. AIDL은 그대로이고 라이브러리만 고쳤다면 patch(`2.0.1`)를 올립니다.
+- 로컬에서 접미사가 붙은 버전으로 빌드하려면 `-PbleApi.publishVersion=2.0.0-beta.1`을 넘깁니다. 이 값도 앞부분이 `bleApi.version`과 같아야 합니다.
 - 로컬 확인: `./gradlew checkBleApi testDebugUnitTest assembleRelease` (`local.properties`의 `sdk.dir` 또는 `ANDROID_HOME`이 필요합니다).
