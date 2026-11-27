@@ -93,3 +93,32 @@ macOS에서는 `base64 -i <파일> | pbcopy`로 복사해서 붙여 넣으면 �
 - `ios beta` lane은 CI에서만 실행됩니다. checkout의 `Runner` 서명을 수동(Apple Distribution과 그 프로파일)으로 바꾸기 때문입니다. 저장소의 프로젝트는 개발용 자동 서명 그대로입니다.
 - `Gemfile.lock`이 아직 없어서 CI는 매번 fastlane 2.x의 최신 버전을 설치합니다. 로컬에서 `bundle install`을 한 번 하고 `Gemfile.lock`을 커밋하면 버전이 고정됩니다. 그 뒤에는 workflow의 `bundle install` 단계를 `ruby/setup-ruby`의 `bundler-cache: true`로 바꿔 캐시할 수 있습니다.
 - 업로드가 실패하면 다시 실행하면 됩니다. 빌드 번호는 매번 스토어에서 다시 읽습니다.
+
+## 문제 해결
+
+### Android: `Google Api Error: ... The caller does not have permission`
+
+Play가 서비스 계정의 요청을 거부한 것입니다. lane은 트랙을 하나도 읽지 못하면 빌드하기 전에 멈춥니다.
+
+- Play Console의 **사용자 및 권한**에 서비스 계정 이메일(`PLAY_SERVICE_ACCOUNT_JSON`의 `client_email`)이 초대돼 있는지 확인합니다.
+- 이 앱(`com.rouddy.bluetooth_communicator.bluetooth_communicator`)에 대한 테스트 트랙 출시 권한이 있는지 확인합니다. 앱을 지정하지 않고 계정 권한만 주면 이 앱에는 적용되지 않을 수 있습니다.
+- JSON 키를 만든 Google Cloud 프로젝트에서 Google Play Android Developer API가 사용 설정돼 있는지 확인합니다.
+- 권한을 방금 줬다면 적용되기까지 시간이 걸릴 수 있습니다(최대 하루 정도).
+- 로그에 패키지 이름이 `com.***.…`처럼 보이는 것은, 값이 `rouddy`인 Secret이 있어서 GitHub가 가린 것입니다. 패키지 이름이 틀린 것은 아닙니다.
+
+### iOS: `No valid Apple Distribution identity of team B56B7YRWDS`
+
+가져온 `.p12`로 서명할 수 없는 것입니다. 에러에 키체인의 identity 목록이 나오고, 유효하지 않은 identity는 이유(`CSSMERR_TP_NOT_TRUSTED`, `CSSMERR_TP_CERT_EXPIRED` 등)가 함께 나옵니다. 목록이 비어 있다면 `.p12`에 개인 키가 없는 것입니다.
+
+원본 `.p12`를 로컬에서 확인합니다(OpenSSL 3이면 `-legacy`가 필요할 수 있습니다).
+
+```bash
+# 1 이상이어야 합니다: 개인 키가 들어 있음
+openssl pkcs12 -in distribution.p12 -nodes -nocerts | grep -c "PRIVATE KEY"
+# subject가 "Apple Distribution: … (B56B7YRWDS)"이고, notAfter가 지나지 않아야 합니다
+openssl pkcs12 -in distribution.p12 -nokeys | openssl x509 -noout -subject -enddate
+```
+
+- 키체인 접근에서 내보낼 때는 **내 인증서** 항목에서 인증서를 펼쳐 개인 키가 함께 있는지 확인하고, 인증서와 개인 키를 함께 내보냅니다. 개인 키가 없는 인증서(다른 Mac에서 만든 것)는 만든 Mac에서 내보내거나 새로 만듭니다.
+- 팀을 `B56B7YRWDS`로 바꾨으므로, 예전 팀(`7AZGU4T6FD`)의 인증서는 쓸 수 없습니다.
+- 새 `.p12`를 넣을 때는 `IOS_DIST_CERT_P12_BASE64`와 `IOS_DIST_CERT_PASSWORD`를 함께 바꿉니다.

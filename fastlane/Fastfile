@@ -30,6 +30,23 @@ def flutter(*args)
   Dir.chdir(ROOT) { sh("flutter", *args) }
 end
 
+# Fails unless the keychains have a valid Apple Distribution identity of the team.
+# A .p12 without its private key, or another team's, imports without complaint but
+# can't sign, and sigh only says it found no matching identity.
+def ensure_distribution_identity!
+  valid = sh("security", "find-identity", "-v", "-p", "codesigning", log: false)
+  return if valid.lines.any? { |line| line.include?("Distribution") && line.include?("(#{IOS_TEAM_ID})") }
+
+  # Without -v it also lists the invalid ones, with the reason (CSSMERR_TP_...).
+  all = sh("security", "find-identity", "-p", "codesigning", log: false)
+  UI.user_error!(
+    "No valid Apple Distribution identity of team #{IOS_TEAM_ID} after importing " \
+    "IOS_DIST_CERT_P12_BASE64:\n#{all}\n" \
+    "The .p12 needs both the certificate and its private key, of an Apple Distribution " \
+    "certificate of team #{IOS_TEAM_ID} that isn't expired or revoked (docs/release.md)."
+  )
+end
+
 platform :android do
   desc "Builds the release AAB and uploads it to the Play internal testing track"
   lane :internal do
@@ -39,12 +56,22 @@ platform :android do
     end
 
     # A version code can't be used twice; take the next one above every track.
+    errors = []
     codes = %w[internal alpha beta production].flat_map do |track|
       google_play_track_version_codes(package_name: ANDROID_PACKAGE, track: track, json_key_data: json_key)
     rescue StandardError => e
-      UI.important("Couldn't read the #{track} track: #{e.message}")
+      errors << "#{track}: #{e.message}"
       []
     end
+    # None readable means Play refused the service account, and the upload would
+    # fail the same way after the build: stop now.
+    if errors.size == 4
+      UI.user_error!(
+        "Couldn't read any Play track of #{ANDROID_PACKAGE}:\n#{errors.join("\n")}\n" \
+        "Give the service account access to this app in Play Console (docs/release.md)."
+      )
+    end
+    errors.each { |error| UI.important("Couldn't read the #{error}") }
     build_number = codes.map(&:to_i).max.to_i + 1
     UI.message("Releasing #{version_name} (#{build_number})")
 
@@ -88,6 +115,16 @@ platform :ios do
       keychain_name: ENV.fetch("MATCH_KEYCHAIN_NAME"),
       keychain_password: ENV.fetch("MATCH_KEYCHAIN_PASSWORD", "")
     )
+    # The intermediates Apple Distribution certificates chain to; without them the
+    # identity isn't valid. Already being there is fine.
+    keychain = File.expand_path("~/Library/Keychains/#{ENV.fetch("MATCH_KEYCHAIN_NAME")}-db")
+    %w[G3 G6].each do |generation|
+      intermediate = File.join(Dir.tmpdir, "AppleWWDRCA#{generation}.cer")
+      sh("curl", "-fsSL", "-o", intermediate,
+         "https://www.apple.com/certificateauthority/AppleWWDRCA#{generation}.cer", log: false)
+      sh("security", "import", intermediate, "-k", keychain, log: false, error_callback: ->(_) {})
+    end
+    ensure_distribution_identity!
 
     build_number = latest_testflight_build_number(
       api_key: api_key,
